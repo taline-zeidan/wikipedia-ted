@@ -1,0 +1,4 @@
+wptools
+requests
+beautifulsoup4
+lxml
