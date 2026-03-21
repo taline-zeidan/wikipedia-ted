@@ -1,10 +1,23 @@
 import os
 import re
-import wptools
+import requests
+import mwparserfromhell
 from xml.etree.ElementTree import Element, SubElement, ElementTree, indent
 
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "raw")
+
+MEDIAWIKI_API = "https://en.wikipedia.org/w/api.php"
+
+DECORATIVE_FIELDS = {
+    "image_flag", "image_flag2", "image_coat", "image_map", "image_map2",
+    "image_map_caption", "image_map2_caption", "image_map_alt", "image_map2_alt",
+    "alt_flag", "alt_flag2", "alt_coat", "flag_border", "flag_caption",
+    "coat_alt", "coat_caption", "symbol_type", "national_anthem",
+    "map_caption", "map_caption2", "image_map_size", "image_map2_size",
+    "coa_size", "flag_width", "footnote_a", "footnote_b", "footnote_c",
+    "footnote_d", "footnote_e", "footnote_f", "footnotes",
+}
 
 UN_MEMBER_STATES = [
     "Afghanistan", "Albania", "Algeria", "Andorra", "Angola", "Antigua and Barbuda",
@@ -39,6 +52,59 @@ UN_MEMBER_STATES = [
     "Vietnam", "Yemen", "Zambia", "Zimbabwe",
 ]
 
+def _fetch_wikitext(country_name: str) -> str:
+    params = {
+        "action": "query",
+        "prop": "revisions",
+        "rvprop": "content",
+        "rvslots": "main",
+        "format": "json",
+        "titles": country_name,
+        "redirects": 1,
+    }
+    headers = {"User-Agent": "WikipediaTEDProject/1.0 (COE543 LAU; Academic Research) python-requests"}
+    response = requests.get(MEDIAWIKI_API, params=params, headers=headers, timeout=15)
+    response.raise_for_status()
+    data = response.json()
+
+    pages = data["query"]["pages"]
+    page = next(iter(pages.values()))
+
+    if "missing" in page:
+        raise ValueError(f"Wikipedia page not found: {country_name}")
+
+    return page["revisions"][0]["slots"]["main"]["*"]
+
+
+def _extract_infobox(wikitext: str) -> dict[str, str]:
+    parsed = mwparserfromhell.parse(wikitext)
+    templates = parsed.filter_templates()
+
+    infobox = None
+    for template in templates:
+        name = template.name.strip().lower()
+        if "infobox country" in name or "infobox former country" in name:
+            infobox = template
+            break
+
+    if infobox is None:
+        raise ValueError("No infobox country template found.")
+
+    result: dict[str, str] = {}
+    for param in infobox.params:
+        key = param.name.strip()
+        value = param.value
+
+        tag = _sanitize_tag(key)
+        if not tag or tag in DECORATIVE_FIELDS:
+            continue
+
+        clean = _sanitize_value(value)
+        if clean:
+            result[tag] = clean
+
+    return result
+
 
 def _sanitize_tag(key: str) -> str:
     tag = key.strip().lower()
@@ -47,35 +113,31 @@ def _sanitize_tag(key: str) -> str:
     tag = tag.strip("_")
     if tag and tag[0].isdigit():
         tag = "field_" + tag
-    return tag or "field"
+    return tag or ""
 
 
-def _sanitize_value(value: str) -> str:
-    value = re.sub(r"\[\[.*?\]\]", lambda m: m.group(0).split("|")[-1].strip("[]"), value)
-    value = re.sub(r"{{.*?}}", "", value)
-    value = re.sub(r"<.*?>", "", value)
-    value = re.sub(r"\s+", " ", value)
-    return value.strip()
+def _sanitize_value(value) -> str:
+    stripped = value.strip_code(
+        normalize=True,
+        collapse=True,
+        keep_template_params=False,
+    )
+    stripped = re.sub(r"\[\d+\]", "", stripped)
+    stripped = re.sub(r"<[^>]+>", "", stripped)
+    stripped = re.sub(r"\s+", " ", stripped)
+    return stripped.strip()
 
 
-def _infobox_to_xml(country_name: str, infobox: dict) -> ElementTree:
+def _infobox_to_xml(country_name: str, infobox: dict[str, str]) -> ElementTree:
     root = Element("country")
     name_el = SubElement(root, "name")
     name_el.text = country_name
 
     for key, value in infobox.items():
-        tag = _sanitize_tag(key)
-        if not tag:
+        if not value:
             continue
-
-        raw_value = str(value) if not isinstance(value, str) else value
-        clean_value = _sanitize_value(raw_value)
-
-        if not clean_value:
-            continue
-
-        child = SubElement(root, tag)
-        child.text = clean_value
+        child = SubElement(root, key)
+        child.text = value
 
     tree = ElementTree(root)
     indent(tree, space="  ")
@@ -93,12 +155,8 @@ def collect_country(country_name: str, overwrite: bool = False) -> str:
     if not overwrite and os.path.exists(output_path):
         return output_path
 
-    page = wptools.page(country_name, silent=True)
-    page.get_parse()
-
-    infobox = page.data.get("infobox")
-    if not infobox:
-        raise ValueError(f"No infobox found for: {country_name}")
+    wikitext = _fetch_wikitext(country_name)
+    infobox = _extract_infobox(wikitext)
 
     tree = _infobox_to_xml(country_name, infobox)
 

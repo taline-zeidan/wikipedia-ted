@@ -1,4 +1,6 @@
-wptools
+mwparserfromhell
 requests
 beautifulsoup4
 lxml
+streamlit
+streamlit-agraph

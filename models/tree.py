@@ -57,7 +57,6 @@ class TreeUtils:
         for i, node in enumerate(postorder_nodes):
             leftmost_index = TreeUtils.get_leftmost_leaf_index(node, postorder_nodes)
             leftmost_map[leftmost_index] = i
-
         return sorted(leftmost_map.values())
 
     @staticmethod
@@ -72,6 +71,32 @@ class TreeUtils:
             current = current.parent
             count += 1
         return count
+
+    @staticmethod
+    def get_path(node: TreeNode) -> List[str]:
+        path = []
+        current = node
+        while current is not None:
+            path.append(current.label)
+            current = current.parent
+        path.reverse()
+        return path
+
+    @staticmethod
+    def get_node_by_path(root: TreeNode, path: List[str]) -> Optional[TreeNode]:
+        if not path or path[0] != root.label:
+            return None
+        current = root
+        for label in path[1:]:
+            found = False
+            for child in current.children:
+                if child.label == label:
+                    current = child
+                    found = True
+                    break
+            if not found:
+                return None
+        return current
 
     @staticmethod
     def pretty_print(root: TreeNode, indent: int = 0) -> None:

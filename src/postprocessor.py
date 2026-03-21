@@ -1,5 +1,6 @@
+import io
 import os
-import xml.etree.ElementTree as ET
+import re
 from xml.etree.ElementTree import Element, ElementTree, indent
 
 from models.tree import TreeNode, TreeUtils
@@ -9,34 +10,33 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "raw")
 INFOBOX_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "infoboxes")
 
 
-# ---------------------------------------------------------------------------
-# Tree → XML Element
-# ---------------------------------------------------------------------------
+_RESERVED_TAGS = {"name", "type", "id", "class"}
 
-def _is_attribute_node(node: TreeNode) -> bool:
-    return (
-        not node.is_content
-        and len(node.children) == 1
-        and node.children[0].is_content
-    )
+def _sanitize_tag(label: str) -> str:
+    tag = re.sub(r"[^\w]", "_", label.strip())
+    tag = re.sub(r"_+", "_", tag).strip("_")
+    if not tag:
+        return "node"
+    if tag[0].isdigit():
+        tag = "field_" + tag
+    if len(tag) == 1 and tag.isalpha():
+        tag = tag + "_node"
+    if tag in _RESERVED_TAGS:
+        tag = "field_" + tag
+    return tag
 
 
 def _tree_to_element(node: TreeNode) -> Element:
-    element = Element(node.label)
+    tag = _sanitize_tag(node.label)
+    element = Element(tag)
 
-    attribute_children = [c for c in node.children if _is_attribute_node(c)]
-    structural_children = [c for c in node.children if not _is_attribute_node(c)]
-
-    for attr_node in sorted(attribute_children, key=lambda n: n.label):
-        element.set(attr_node.label, attr_node.children[0].label)
-
-    content_children = [c for c in structural_children if c.is_content]
-    element_children = [c for c in structural_children if not c.is_content]
+    content_children = [c for c in node.children if c.is_content]
+    structural_children = [c for c in node.children if not c.is_content]
 
     if content_children:
         element.text = " ".join(c.label for c in content_children)
 
-    for child in element_children:
+    for child in structural_children:
         element.append(_tree_to_element(child))
 
     return element
@@ -47,35 +47,22 @@ def tree_to_xml_string(root: TreeNode) -> str:
     xml_tree = ElementTree(element)
     indent(xml_tree, space="  ")
 
-    import io
     buffer = io.StringIO()
     xml_tree.write(buffer, encoding="unicode", xml_declaration=True)
     return buffer.getvalue()
 
-
-# ---------------------------------------------------------------------------
-# Tree → Wikipedia infobox wikitext
-# ---------------------------------------------------------------------------
-
-def _collect_infobox_fields(node: TreeNode) -> dict[str, str]:
+def _flatten_to_fields(node: TreeNode, prefix: str = "") -> dict[str, str]:
     fields: dict[str, str] = {}
 
-    for child in node.children:
-        if child.is_content:
-            continue
+    content_children = [c for c in node.children if c.is_content]
+    structural_children = [c for c in node.children if not c.is_content]
 
-        if _is_attribute_node(child):
-            continue
-
-        content_tokens = [c.label for c in child.children if c.is_content]
-        sub_elements = [c for c in child.children if not c.is_content and not _is_attribute_node(c)]
-
-        if content_tokens and not sub_elements:
-            fields[child.label] = " ".join(content_tokens)
-        elif sub_elements:
-            nested = _collect_infobox_fields(child)
-            for sub_key, sub_value in nested.items():
-                fields[f"{child.label}__{sub_key}"] = sub_value
+    if content_children and not structural_children:
+        fields[prefix] = " ".join(c.label for c in content_children)
+    else:
+        for child in structural_children:
+            key = f"{prefix}__{child.label}" if prefix else child.label
+            fields.update(_flatten_to_fields(child, key))
 
     return fields
 
@@ -87,25 +74,20 @@ def tree_to_infobox_string(root: TreeNode) -> str:
             country_name = child.children[0].label
             break
 
-    fields = _collect_infobox_fields(root)
-    lines = [f"{{{{Infobox country"]
+    fields = _flatten_to_fields(root)
+    lines = ["{{Infobox country"]
 
     if country_name:
         lines.append(f"| conventional_long_name = {country_name}")
 
     for key, value in fields.items():
-        if key == "name":
+        if key in ("name", "country"):
             continue
         display_key = key.replace("__", "_")
         lines.append(f"| {display_key} = {value}")
 
     lines.append("}}")
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Save to file
-# ---------------------------------------------------------------------------
 
 def save_as_xml(root: TreeNode, country_name: str, output_dir: str = DATA_DIR) -> str:
     os.makedirs(output_dir, exist_ok=True)
@@ -130,10 +112,6 @@ def save_as_infobox(root: TreeNode, country_name: str, output_dir: str = INFOBOX
 
     return filepath
 
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 def postprocess(root: TreeNode, country_name: str, fmt: str = "xml") -> str:
     if fmt == "xml":
