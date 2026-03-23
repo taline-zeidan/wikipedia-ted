@@ -24,12 +24,14 @@ def _load_edit_script(filepath: str) -> EditScript:
     for op_el in root.findall("operation"):
         path_str = op_el.get("path", "")
         path = path_str.split("/") if path_str else []
+        sed = op_el.get("string_edit_distance")
         operations.append(EditOperation(
             operation=op_el.get("type", ""),
             node_label=op_el.get("node_label", ""),
             path=path,
             target_label=op_el.get("target_label"),
             is_content=op_el.get("is_content", "False") == "True",
+            string_edit_distance=int(sed) if sed is not None else None,
         ))
 
     return EditScript(

@@ -1,6 +1,10 @@
 from __future__ import annotations
 from typing import List, Optional
 
+# Stable path segment for content nodes (sibling index under parent). Same field in two
+# countries shares the same path; the value lives in node.label, not in the path.
+CONTENT_SLOT_PREFIX = "__content__"
+
 
 class TreeNode:
     def __init__(self, label: str, is_content: bool = False) -> None:
@@ -73,7 +77,27 @@ class TreeUtils:
         return count
 
     @staticmethod
+    def is_content_slot_segment(segment: str) -> bool:
+        if not segment.startswith(CONTENT_SLOT_PREFIX):
+            return False
+        rest = segment[len(CONTENT_SLOT_PREFIX) :]
+        return rest.isdigit()
+
+    @staticmethod
+    def parse_content_slot_index(segment: str) -> Optional[int]:
+        if not TreeUtils.is_content_slot_segment(segment):
+            return None
+        return int(segment[len(CONTENT_SLOT_PREFIX) :])
+
+    @staticmethod
     def get_path(node: TreeNode) -> List[str]:
+        if node.is_content:
+            parent = node.parent
+            if parent is None:
+                return [node.label]
+            base = TreeUtils.get_path(parent)
+            idx = parent.children.index(node)
+            return base + [f"{CONTENT_SLOT_PREFIX}{idx}"]
         path = []
         current = node
         while current is not None:
@@ -88,6 +112,13 @@ class TreeUtils:
             return None
         current = root
         for label in path[1:]:
+            slot = TreeUtils.parse_content_slot_index(label)
+            if slot is not None:
+                if 0 <= slot < len(current.children):
+                    current = current.children[slot]
+                else:
+                    return None
+                continue
             found = False
             for child in current.children:
                 if child.label == label:

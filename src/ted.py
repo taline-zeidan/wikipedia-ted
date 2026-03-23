@@ -17,6 +17,7 @@ class EditOperation:
     path: list[str]
     target_label: Optional[str] = None
     is_content: bool = False
+    string_edit_distance: Optional[int] = None
 
 
 @dataclass
@@ -30,12 +31,34 @@ class EditScript:
         return len(self.operations)
 
 
+def levenshtein_distance(a: str, b: str) -> int:
+    """Unit-cost Levenshtein (insert/delete/substitute) on Unicode code points."""
+    if a == b:
+        return 0
+    m, n = len(a), len(b)
+    if m == 0:
+        return n
+    if n == 0:
+        return m
+    prev = list(range(n + 1))
+    for i in range(m):
+        cur = [i + 1] + [0] * n
+        for j in range(n):
+            cost = 0 if a[i] == b[j] else 1
+            cur[j + 1] = min(cur[j] + 1, prev[j + 1] + 1, prev[j] + cost)
+        prev = cur
+    return prev[n]
+
+
 def _rename_cost(n1: TreeNode, n2: TreeNode) -> int:
     if n1.label == n2.label:
         return 0
     if not n1.is_content and not n2.is_content:
         return 10000
-    return 1
+    # Never charge more than delete+insert for a leaf replacement, so TED prefers RENAME
+    # over spurious DELETE+INSERT when strings differ a lot.
+    lev = levenshtein_distance(n1.label, n2.label)
+    return min(lev, _delete_cost(n1) + _insert_cost(n2))
 
 
 def _insert_cost(_: TreeNode) -> int:
@@ -168,6 +191,7 @@ def _extract_operations(
                     path=TreeUtils.get_path(node1),
                     target_label=node2.label,
                     is_content=node1.is_content,
+                    string_edit_distance=levenshtein_distance(node1.label, node2.label),
                 ))
         elif op_type == "DELETE":
             node1 = nodes1[idx1]
@@ -280,6 +304,8 @@ def _serialize_edit_script(script: EditScript) -> ElementTree:
         op_el.set("is_content", str(op.is_content))
         if op.target_label is not None:
             op_el.set("target_label", op.target_label)
+        if op.string_edit_distance is not None:
+            op_el.set("string_edit_distance", str(op.string_edit_distance))
 
     tree = ElementTree(root)
     indent(tree, space="  ")
@@ -336,7 +362,10 @@ def _clean_operations(operations: list[EditOperation], t1: TreeNode, t2: TreeNod
                     continue
             if tuple(op.path) in deleted_paths:
                 continue
-            t2_path = op.path[:-1] + [op.target_label]
+            if op.path and TreeUtils.is_content_slot_segment(op.path[-1]):
+                t2_path = op.path
+            else:
+                t2_path = op.path[:-1] + [op.target_label]
             if TreeUtils.get_node_by_path(t2, t2_path) is None:
                 continue
             if op.is_content:

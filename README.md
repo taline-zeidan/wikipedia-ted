@@ -25,7 +25,7 @@ The pipeline consists of five core stages plus a web interface:
 
 1. **Data Collection** — Scrape Wikipedia infoboxes for all 193 UN member states using the MediaWiki API and `mwparserfromhell`
 2. **Pre-processing** — Parse XML documents into rooted ordered labeled trees with semantic grouping of related fields
-3. **TED + Differencing** — Compute label-preserving Tree Edit Distance using Zhang-Shasha (adapted by Nierman & Jagadish) and extract a path-based edit script
+3. **TED + Differencing** — Compute label-preserving Tree Edit Distance using Zhang-Shasha (adapted by Nierman & Jagadish) and extract a path-based edit script with Levenshtein-annotated renames
 4. **Patching** — Apply the edit script to transform one tree into another using stable path-based node addressing
 5. **Post-processing** — Reconstruct the patched tree as XML or Wikipedia wikitext
 6. **Web UI** — Interactive Streamlit application for country comparison, tree visualization, and result exploration
@@ -120,7 +120,9 @@ collect_all()
 
 ### `models/tree.py`
 
-Defines the `TreeNode` class and `TreeUtils` helpers used by all modules. Each node carries a `label` and an `is_content` flag distinguishing structural nodes (XML tag names) from content nodes (text values). `TreeUtils` provides postorder traversal, leftmost leaf computation, keyroot identification, and stable path-based navigation via `get_path()` and `get_node_by_path()`.
+Defines the `TreeNode` class and `TreeUtils` helpers used by all modules. Each node carries a `label` and an `is_content` flag distinguishing structural nodes (XML tag names) from content nodes (text values).
+
+`TreeUtils` provides postorder traversal, leftmost leaf computation, keyroot identification, and stable path-based navigation via `get_path()` and `get_node_by_path()`. Content nodes are addressed using slot-indexed path segments (e.g. `__content__0`) rather than their label, so two countries whose fields share the same structure but different values resolve to the same path. The helpers `is_content_slot_segment()` and `parse_content_slot_index()` are used internally by both `get_path()` and `get_node_by_path()` to handle this distinction.
 
 ### `src/collector.py`
 
@@ -132,11 +134,15 @@ Parses XML into a `TreeNode` hierarchy. Fields are classified as atomic (stored 
 
 ### `src/ted.py`
 
-Implements the Zhang-Shasha algorithm adapted by Nierman and Jagadish with label-preserving costs: structural node renames cost 10000 (effectively infinity), content node renames cost 1, inserts and deletes cost 1. Stores all forest distance tables during the forward pass for correct backtracking. After extraction, `_clean_operations()` applies seven filters to remove phantom matches from the DP, and `_sweep_missing_deletes()` catches any nodes present in T1 but absent in T2 that backtracking missed. Operations store stable tree paths (`["country", "population", "estimate"]`) rather than postorder indices.
+Implements the Zhang-Shasha algorithm adapted by Nierman and Jagadish with label-preserving costs: structural node renames cost 10000 (effectively infinity), content node renames cost `min(levenshtein(a, b), delete + insert)`, inserts and deletes cost 1. Using the Levenshtein distance as the rename cost — capped at delete + insert — ensures the algorithm always prefers a rename over a spurious delete-insert pair when two content values differ slightly. The Levenshtein distance is also stored on each RENAME operation in the edit script for display in the UI.
+
+Stores all forest distance tables during the forward pass for correct backtracking. After extraction, `_clean_operations()` applies seven filters to remove phantom matches from the DP, and `_sweep_missing_deletes()` catches any nodes present in T1 but absent in T2 that backtracking missed. Operations store stable tree paths (`["country", "population", "estimate"]`) rather than postorder indices.
 
 ### `src/patcher.py`
 
 Applies an `EditScript` to a source tree using path-based node navigation. Renames are applied first, then deletes deepest-first (longest path first), then inserts. After deletion, `_prune_empty_structural_nodes()` removes any structural nodes left childless. Path stability means no index recomputation is needed between operations.
+
+In addition to `patch()`, which applies an in-memory `EditScript` directly, the module exposes `patch_from_file()` for loading and applying a persisted diff XML from disk, and `patch_countries()` as a convenience wrapper that resolves the diff file path from two country names.
 
 ### `src/postprocessor.py`
 
@@ -162,9 +168,13 @@ Extracts available top-level field names from a tree and returns a filtered copy
 
 **Label-preserving TED:** Structural node renames are assigned a cost of 10000, effectively preventing the algorithm from matching nodes of different types across fields. This directly implements the project requirement to distinguish between document structure and content, and is consistent with the Nierman & Jagadish formulation.
 
+**Levenshtein rename cost:** Content node renames are priced at `min(levenshtein(a, b), delete + insert)` rather than a flat cost of 1. This means the TED score reflects the actual edit effort between content values, and the stored `string_edit_distance` on each RENAME operation gives the UI a meaningful annotation of how different two values are.
+
 **Semantic tree grouping:** Related flat infobox fields (e.g. `population_estimate`, `population_density_km2`, `population_rank`) are grouped into a single `population` subtree during preprocessing. This makes TED structurally meaningful — two countries with similar population data produce similar subtrees and lower edit distance, rather than having unrelated flat fields matched by proximity.
 
 **Atomic fields:** Fields containing structured list data (religion breakdowns, language distributions, government type) are stored as single atomic content nodes. Tokenizing these would produce semantically meaningless fragments and inflate TED scores artificially.
+
+**Content slot paths:** Content nodes are addressed in the edit script using slot-indexed path segments (`__content__0`, `__content__1`) rather than their label text. This means a rename operation on a content node is unambiguous regardless of the node's value, and the patcher can locate the correct node even when sibling content nodes share the same label.
 
 **Path-based edit script:** Operations store the full path from root to the target node rather than a postorder index. This eliminates index drift after insertions and deletions, making the patcher stable and correct regardless of tree depth or structural differences between countries.
 
