@@ -166,18 +166,10 @@ def _extract_operations(
             fd = fd_store[(i, j)]
             _backtrack_fd(i, j, fd, nodes1, nodes2, lm1, lm2, td, fd_store, raw_ops)
 
-    delete_indices = {idx for op, idx, _, _ in raw_ops if op == "DELETE"}
-    insert_indices = {idx for op, _, idx, _ in raw_ops if op == "INSERT" and idx is not None}
-    spurious_delete = delete_indices & insert_indices
-
     seen: set[tuple] = set()
     operations: list[EditOperation] = []
 
     for op_type, idx1, idx2, is_content in raw_ops:
-        if op_type == "DELETE" and idx1 in spurious_delete:
-            continue
-        if op_type == "INSERT" and idx2 in spurious_delete:
-            continue
 
         if op_type == "RENAME":
             node1 = nodes1[idx1]
@@ -324,75 +316,28 @@ def save_edit_script(script: EditScript) -> str:
     return filepath
 
 def _clean_operations(operations: list[EditOperation], t1: TreeNode, t2: TreeNode) -> list[EditOperation]:
-    rename_map: dict[tuple, EditOperation] = {}
-    for op in operations:
-        if op.operation == "RENAME":
-            key = (tuple(op.path[:-1]), op.node_label, op.target_label)
-            rename_map[key] = op
-
-    cancelling: set[tuple] = set()
-    for key in rename_map:
-        parent, src, tgt = key
-        if (parent, tgt, src) in rename_map:
-            cancelling.add(key)
-            cancelling.add((parent, tgt, src))
-
-    deleted_paths: set[tuple] = {
-        tuple(op.path) for op in operations if op.operation == "DELETE"
-    }
-    inserted_paths: set[tuple] = {
-        tuple(op.path) for op in operations if op.operation == "INSERT"
-    }
-
     clean: list[EditOperation] = []
+
     for op in operations:
         if op.operation == "RENAME":
-            key = (tuple(op.path[:-1]), op.node_label, op.target_label)
-            if key in cancelling:
-                continue
             node = TreeUtils.get_node_by_path(t1, op.path)
             if node is None or node.label != op.node_label:
                 continue
-            t2_node = TreeUtils.get_node_by_path(t2, op.path)
-            if t2_node is not None and t2_node.label == op.node_label:
-                continue
-            if not op.is_content and node.parent is not None:
-                sibling_labels = {c.label for c in node.parent.children}
-                if op.target_label in sibling_labels:
-                    continue
-            if tuple(op.path) in deleted_paths:
-                continue
-            if op.path and TreeUtils.is_content_slot_segment(op.path[-1]):
-                t2_path = op.path
-            else:
-                t2_path = op.path[:-1] + [op.target_label]
-            if TreeUtils.get_node_by_path(t2, t2_path) is None:
-                continue
-            if op.is_content:
-                parent_path = op.path[:-1]
-                t2_parent = TreeUtils.get_node_by_path(t2, parent_path)
-                if t2_parent is None:
-                    continue
-                t2_content_values = {c.label for c in t2_parent.children if c.is_content}
-                if op.target_label not in t2_content_values:
-                    continue
+            clean.append(op)
+
         elif op.operation == "DELETE":
             node = TreeUtils.get_node_by_path(t1, op.path)
             if node is None:
                 continue
-            if TreeUtils.get_node_by_path(t2, op.path) is not None:
-                continue
+            clean.append(op)
+
         elif op.operation == "INSERT":
             parent = TreeUtils.get_node_by_path(t1, op.path)
             if parent is None:
                 continue
-            existing_labels = {c.label for c in parent.children}
-            if op.node_label in existing_labels:
-                continue
-        clean.append(op)
-    clean = _sweep_missing_deletes(clean, t1, t2)
-    return clean
+            clean.append(op)
 
+    return clean
 
 def _sweep_missing_deletes(
     operations: list[EditOperation], t1: TreeNode, t2: TreeNode
@@ -439,6 +384,15 @@ def compute_ted(t1: TreeNode, t2: TreeNode, source: str = "T1", target: str = "T
 
     ted_score = td[len(nodes1) - 1][len(nodes2) - 1]
     raw_operations = _extract_operations(td, fd_store, nodes1, nodes2, lm1, lm2)
+
+    raw_rename_count = sum(1 for op in raw_operations if op.operation == "RENAME")
+    raw_delete_count = sum(1 for op in raw_operations if op.operation == "DELETE")
+    raw_insert_count = sum(1 for op in raw_operations if op.operation == "INSERT")
+
+    print("RAW Renames:", raw_rename_count)
+    print("RAW Deletes:", raw_delete_count)
+    print("RAW Inserts:", raw_insert_count)
+
     operations = _clean_operations(raw_operations, t1, t2)
 
     return EditScript(

@@ -57,31 +57,30 @@ def _flatten_to_fields(node: TreeNode, prefix: str = "") -> dict[str, str]:
     content_children = [c for c in node.children if c.is_content]
     structural_children = [c for c in node.children if not c.is_content]
 
-    if content_children and not structural_children:
-        fields[prefix] = " ".join(c.label for c in content_children)
-    else:
-        for child in structural_children:
-            key = f"{prefix}__{child.label}" if prefix else child.label
-            fields.update(_flatten_to_fields(child, key))
+    # Keep direct text/content at this node if it exists
+    if content_children and prefix:
+        value = " ".join(c.label for c in content_children).strip()
+        if value:
+            normalized_prefix = prefix.replace("__field_name", "__name")
+            if normalized_prefix == "field_name":
+                normalized_prefix = "name"
+            fields[normalized_prefix] = value
+
+    # Recurse into structural children
+    for child in structural_children:
+        child_label = "name" if child.label == "field_name" else child.label
+        key = f"{prefix}__{child_label}" if prefix else child_label
+        fields.update(_flatten_to_fields(child, key))
 
     return fields
 
 
 def tree_to_infobox_string(root: TreeNode) -> str:
-    country_name = ""
-    for child in root.children:
-        if child.label == "name" and child.children:
-            country_name = child.children[0].label
-            break
-
     fields = _flatten_to_fields(root)
     lines = ["{{Infobox country"]
 
-    if country_name:
-        lines.append(f"| conventional_long_name = {country_name}")
-
     for key, value in fields.items():
-        if key in ("name", "country"):
+        if key == "country":
             continue
         display_key = key.replace("__", "_")
         lines.append(f"| {display_key} = {value}")

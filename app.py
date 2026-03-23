@@ -9,7 +9,7 @@ from src.collector import collect_country, UN_MEMBER_STATES
 from src.preprocessor import load_tree
 from src.ted import compute_ted, save_edit_script
 from src.patcher import patch
-from src.postprocessor import tree_to_xml_string
+from src.postprocessor import tree_to_xml_string, tree_to_infobox_string
 from src.filter import get_available_fields, filter_tree
 from models.tree import TreeNode, TreeUtils
 from streamlit_agraph import agraph, Node, Edge, Config
@@ -239,22 +239,43 @@ if compare_btn:
         nodes2 = TreeUtils.postorder(ft2)
 
         edit_script = compute_ted(ft1, ft2, source=country1, target=country2)
+
+        rename_count = sum(1 for op in edit_script.operations if op.operation == "RENAME")
+        delete_count = sum(1 for op in edit_script.operations if op.operation == "DELETE")
+        insert_count = sum(1 for op in edit_script.operations if op.operation == "INSERT")
+
+        st.write("Renames:", rename_count)
+        st.write("Deletes:", delete_count)
+        st.write("Inserts:", insert_count)
+
+        for op in edit_script.operations:
+            if op.operation == "DELETE" and any(
+                x in op.path for x in ["leaders", "languages", "languages2", "demonym", "ethnic_groups_year", "official_languages"]
+            ):
+                st.write(op.operation, op.path, op.node_label)
+        st.write("TED score:", edit_script.ted_score)
+        st.write("Operation count:", len(edit_script.operations))
+
+        for i, op in enumerate(edit_script.operations[:30], 1):
+            st.write(i, op.operation, op.path, op.node_label, op.target_label)
         save_edit_script(edit_script)
 
         normalized = _normalized_ted(edit_script.ted_score, len(nodes1), len(nodes2))
 
         patched = patch(copy.deepcopy(ft1), edit_script)
         patched_xml = tree_to_xml_string(patched)
+        patched_infobox = tree_to_infobox_string(patched)
 
-    st.session_state.result = {
-        "edit_script": edit_script,
-        "normalized": normalized,
-        "ft1": ft1,
-        "ft2": ft2,
-        "patched_xml": patched_xml,
-        "n1": len(nodes1),
-        "n2": len(nodes2),
-    }
+        st.session_state.result = {
+            "edit_script": edit_script,
+            "normalized": normalized,
+            "ft1": ft1,
+            "ft2": ft2,
+            "patched_xml": patched_xml,
+            "patched_infobox": patched_infobox,
+            "n1": len(nodes1),
+            "n2": len(nodes2),
+        }
 
 if st.session_state.result is None:
     st.stop()
@@ -265,6 +286,7 @@ normalized = result["normalized"]
 ft1 = result["ft1"]
 ft2 = result["ft2"]
 patched_xml = result["patched_xml"]
+patched_infobox = result["patched_infobox"]
 
 st.markdown("### Results")
 
@@ -386,19 +408,15 @@ with tab2:
 with tab3:
     st.markdown(f"##### {country1} patched → {country2}")
     st.caption("This is the result of applying the edit script to transform the source tree into the target.")
-    st.code(patched_xml, language="xml")
 
-    with st.expander("🔍 Debug: Operation details"):
-        st.markdown("**All operations applied:**")
-        for op in edit_script.operations:
-            path_str = "/".join(op.path)
-            sed = op.string_edit_distance
-            sed_part = f" &nbsp; Levenshtein={sed}" if sed is not None else ""
-            st.markdown(
-                f'`{op.operation}` &nbsp; `{path_str}` &nbsp;→&nbsp; `{op.target_label}`{sed_part}',
-                unsafe_allow_html=True,
-            )
+    out1, out2 = st.tabs(["XML", "Infobox"])
 
+    with out1:
+        st.code(patched_xml, language="xml")
+
+    with out2:
+        st.code(patched_infobox, language="text")
+        
 with tab4:
     rc1, rc2 = st.columns(2)
     with rc1:
