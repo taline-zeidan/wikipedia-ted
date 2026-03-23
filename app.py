@@ -240,24 +240,6 @@ if compare_btn:
 
         edit_script = compute_ted(ft1, ft2, source=country1, target=country2)
 
-        rename_count = sum(1 for op in edit_script.operations if op.operation == "RENAME")
-        delete_count = sum(1 for op in edit_script.operations if op.operation == "DELETE")
-        insert_count = sum(1 for op in edit_script.operations if op.operation == "INSERT")
-
-        st.write("Renames:", rename_count)
-        st.write("Deletes:", delete_count)
-        st.write("Inserts:", insert_count)
-
-        for op in edit_script.operations:
-            if op.operation == "DELETE" and any(
-                x in op.path for x in ["leaders", "languages", "languages2", "demonym", "ethnic_groups_year", "official_languages"]
-            ):
-                st.write(op.operation, op.path, op.node_label)
-        st.write("TED score:", edit_script.ted_score)
-        st.write("Operation count:", len(edit_script.operations))
-
-        for i, op in enumerate(edit_script.operations[:30], 1):
-            st.write(i, op.operation, op.path, op.node_label, op.target_label)
         save_edit_script(edit_script)
 
         normalized = _normalized_ted(edit_script.ted_score, len(nodes1), len(nodes2))

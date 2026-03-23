@@ -1,3 +1,4 @@
+import io
 import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ class EditOperation:
     target_label: Optional[str] = None
     is_content: bool = False
     string_edit_distance: Optional[int] = None
+    position: Optional[int] = None
+    subtree_xml: Optional[str] = None
 
 
 @dataclass
@@ -31,8 +34,8 @@ class EditScript:
         return len(self.operations)
 
 
+
 def levenshtein_distance(a: str, b: str) -> int:
-    """Unit-cost Levenshtein (insert/delete/substitute) on Unicode code points."""
     if a == b:
         return 0
     m, n = len(a), len(b)
@@ -53,10 +56,10 @@ def levenshtein_distance(a: str, b: str) -> int:
 def _rename_cost(n1: TreeNode, n2: TreeNode) -> int:
     if n1.label == n2.label:
         return 0
+    if n1.is_content != n2.is_content:
+        return 10000
     if not n1.is_content and not n2.is_content:
         return 10000
-    # Never charge more than delete+insert for a leaf replacement, so TED prefers RENAME
-    # over spurious DELETE+INSERT when strings differ a lot.
     lev = levenshtein_distance(n1.label, n2.label)
     return min(lev, _delete_cost(n1) + _insert_cost(n2))
 
@@ -67,6 +70,8 @@ def _insert_cost(_: TreeNode) -> int:
 
 def _delete_cost(_: TreeNode) -> int:
     return 1
+
+
 
 def _compute_leftmost_leaves(postorder_nodes: list[TreeNode]) -> list[int]:
     return [TreeUtils.get_leftmost_leaf_index(node, postorder_nodes) for node in postorder_nodes]
@@ -146,140 +151,186 @@ def _compute_forest_distance(
 
     return fd
 
-def _extract_operations(
+
+
+
+def _extract_mapping(
     td: list[list[int]],
     fd_store: dict[tuple[int, int], list[list[int]]],
     nodes1: list[TreeNode],
     nodes2: list[TreeNode],
     lm1: list[int],
     lm2: list[int],
-) -> list[EditOperation]:
-    raw_ops: list[tuple[str, int, Optional[int], bool]] = []
-
-    kr1 = _compute_keyroots(nodes1, lm1)
-    kr2 = _compute_keyroots(nodes2, lm2)
-
-    for i in reversed(kr1):
-        for j in reversed(kr2):
-            if (i, j) not in fd_store:
-                continue
-            fd = fd_store[(i, j)]
-            _backtrack_fd(i, j, fd, nodes1, nodes2, lm1, lm2, td, fd_store, raw_ops)
-
-    seen: set[tuple] = set()
-    operations: list[EditOperation] = []
-
-    for op_type, idx1, idx2, is_content in raw_ops:
-
-        if op_type == "RENAME":
-            node1 = nodes1[idx1]
-            node2 = nodes2[idx2]
-            key = ("RENAME", idx1)
-            if key not in seen:
-                seen.add(key)
-                operations.append(EditOperation(
-                    operation="RENAME",
-                    node_label=node1.label,
-                    path=TreeUtils.get_path(node1),
-                    target_label=node2.label,
-                    is_content=node1.is_content,
-                    string_edit_distance=levenshtein_distance(node1.label, node2.label),
-                ))
-        elif op_type == "DELETE":
-            node1 = nodes1[idx1]
-            key = ("DELETE", idx1)
-            if key not in seen:
-                seen.add(key)
-                operations.append(EditOperation(
-                    operation="DELETE",
-                    node_label=node1.label,
-                    path=TreeUtils.get_path(node1),
-                    is_content=node1.is_content,
-                ))
-        elif op_type == "INSERT":
-            node2 = nodes2[idx2]
-            parent_path = TreeUtils.get_path(node2.parent) if node2.parent else []
-            key = ("INSERT", idx2)
-            if key not in seen:
-                seen.add(key)
-                operations.append(EditOperation(
-                    operation="INSERT",
-                    node_label=node2.label,
-                    path=parent_path,
-                    is_content=node2.is_content,
-                ))
-
-    return operations
+) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    root1 = len(nodes1) - 1
+    root2 = len(nodes2) - 1
+    _backtrack_mapping(root1, root2, fd_store, nodes1, nodes2, lm1, lm2, td, mapping)
+    return mapping
 
 
-def _backtrack_fd(
+def _backtrack_mapping(
     i: int,
     j: int,
-    fd: list[list[int]],
+    fd_store: dict[tuple[int, int], list[list[int]]],
     nodes1: list[TreeNode],
     nodes2: list[TreeNode],
     lm1: list[int],
     lm2: list[int],
     td: list[list[int]],
-    fd_store: dict[tuple[int, int], list[list[int]]],
-    raw_ops: list,
+    mapping: dict[int, int],
 ) -> None:
+    if (i, j) not in fd_store:
+        return
+
+    fd = fd_store[(i, j)]
     i_offset = lm1[i]
     j_offset = lm2[j]
 
     x = i - i_offset + 1
     y = j - j_offset + 1
 
-    while x > 0 or y > 0:
-        if x == 0:
-            y -= 1
-            j_idx = j_offset + y
-            raw_ops.append(("INSERT", None, j_idx, nodes2[j_idx].is_content))
-        elif y == 0:
-            x -= 1
-            i_idx = i_offset + x
-            raw_ops.append(("DELETE", i_idx, None, nodes1[i_idx].is_content))
-        else:
-            i_idx = i_offset + x - 1
-            j_idx = j_offset + y - 1
-            node1 = nodes1[i_idx]
-            node2 = nodes2[j_idx]
+    while x > 0 and y > 0:
+        i_idx = i_offset + x - 1
+        j_idx = j_offset + y - 1
+        node1 = nodes1[i_idx]
+        node2 = nodes2[j_idx]
 
-            cost_delete = fd[x - 1][y] + _delete_cost(node1)
-            cost_insert = fd[x][y - 1] + _insert_cost(node2)
+        cost_delete = fd[x - 1][y] + _delete_cost(node1)
+        cost_insert = fd[x][y - 1] + _insert_cost(node2)
 
-            if lm1[i_idx] == lm1[i] and lm2[j_idx] == lm2[j]:
-                cost_rename = fd[x - 1][y - 1] + _rename_cost(node1, node2)
-                if fd[x][y] == cost_rename:
-                    if node1.label != node2.label:
-                        raw_ops.append(("RENAME", i_idx, j_idx, node1.is_content))
-                    x -= 1
-                    y -= 1
-                elif fd[x][y] == cost_delete:
-                    raw_ops.append(("DELETE", i_idx, None, node1.is_content))
-                    x -= 1
-                else:
-                    raw_ops.append(("INSERT", None, j_idx, node2.is_content))
-                    y -= 1
+        if lm1[i_idx] == lm1[i] and lm2[j_idx] == lm2[j]:
+            cost_rename = fd[x - 1][y - 1] + _rename_cost(node1, node2)
+            if fd[x][y] == cost_rename:
+                mapping[i_idx] = j_idx
+                x -= 1
+                y -= 1
+            elif fd[x][y] == cost_delete:
+                x -= 1
             else:
-                mapped_x = lm1[i_idx] - i_offset
-                mapped_y = lm2[j_idx] - j_offset
-                cost_subtree = fd[mapped_x][mapped_y] + td[i_idx][j_idx]
+                y -= 1
+        else:
+            mapped_x = lm1[i_idx] - i_offset
+            mapped_y = lm2[j_idx] - j_offset
+            cost_subtree = fd[mapped_x][mapped_y] + td[i_idx][j_idx]
 
-                if fd[x][y] == cost_subtree:
-                    if (i_idx, j_idx) in fd_store:
-                        _backtrack_fd(
-                            i_idx, j_idx, fd_store[(i_idx, j_idx)],
-                            nodes1, nodes2, lm1, lm2, td, fd_store, raw_ops,
-                        )
-                    x = mapped_x
-                    y = mapped_y
-                elif fd[x][y] == cost_delete:
-                    raw_ops.append(("DELETE", i_idx, None, node1.is_content))
-                    x -= 1
-                else:
-                    raw_ops.append(("INSERT", None, j_idx, node2.is_content))
-                    y -= 1
+            if fd[x][y] == cost_subtree:
+                _backtrack_mapping(
+                    i_idx, j_idx, fd_store,
+                    nodes1, nodes2, lm1, lm2, td, mapping,
+                )
+                x = mapped_x
+                y = mapped_y
+            elif fd[x][y] == cost_delete:
+                x -= 1
+            else:
+                y -= 1
+
+
+
+
+def _mapping_to_operations(
+    mapping: dict[int, int],
+    nodes1: list[TreeNode],
+    nodes2: list[TreeNode],
+) -> list[EditOperation]:
+    operations: list[EditOperation] = []
+    matched_source = set(mapping.keys())
+    matched_target = set(mapping.values())
+    reverse_map = {j: i for i, j in mapping.items()}
+
+    for src_idx, tgt_idx in mapping.items():
+        n1 = nodes1[src_idx]
+        n2 = nodes2[tgt_idx]
+        if n1.label == n2.label:
+            continue
+        if n1.is_content and n2.is_content:
+            operations.append(EditOperation(
+                operation="RENAME",
+                node_label=n1.label,
+                path=TreeUtils.get_path(n1),
+                target_label=n2.label,
+                is_content=True,
+                string_edit_distance=levenshtein_distance(n1.label, n2.label),
+            ))
+
+    for src_idx, n1 in enumerate(nodes1):
+        if src_idx not in matched_source:
+            operations.append(EditOperation(
+                operation="DELETE",
+                node_label=n1.label,
+                path=TreeUtils.get_path(n1),
+                is_content=n1.is_content,
+            ))
+
+    for tgt_idx, n2 in enumerate(nodes2):
+        if tgt_idx in matched_target:
+            continue
+
+        parent_t2 = n2.parent
+        position = parent_t2.children.index(n2) if parent_t2 else 0
+
+        if parent_t2 is not None and parent_t2.postorder_index in matched_target:
+            src_parent_idx = reverse_map[parent_t2.postorder_index]
+            parent_path = TreeUtils.get_path(nodes1[src_parent_idx])
+        else:
+            parent_path = TreeUtils.get_path(parent_t2) if parent_t2 else []
+
+        is_topmost = (parent_t2 is not None and parent_t2.postorder_index in matched_target)
+        subtree_xml = None
+        if is_topmost and not n2.is_content and n2.children:
+            if _all_descendants_unmatched(n2, matched_target):
+                subtree_xml = _serialize_subtree_to_xml(n2)
+
+        operations.append(EditOperation(
+            operation="INSERT",
+            node_label=n2.label,
+            path=parent_path,
+            is_content=n2.is_content,
+            position=position,
+            subtree_xml=subtree_xml,
+        ))
+
+    return operations
+
+
+def _all_descendants_unmatched(node: TreeNode, matched_target: set[int]) -> bool:
+    if node.postorder_index in matched_target:
+        return False
+    return all(_all_descendants_unmatched(c, matched_target) for c in node.children)
+
+
+
+def _serialize_subtree_to_xml(node: TreeNode) -> str:
+    el = _subtree_to_element(node)
+    tree = ElementTree(el)
+    indent(tree, space="  ")
+    buf = io.StringIO()
+    tree.write(buf, encoding="unicode")
+    return buf.getvalue()
+
+
+def _subtree_to_element(node: TreeNode) -> Element:
+    el = Element("node")
+    el.set("label", node.label)
+    el.set("is_content", str(node.is_content))
+    for child in node.children:
+        el.append(_subtree_to_element(child))
+    return el
+
+
+def element_to_subtree(el: Element) -> TreeNode:
+    node = TreeNode(
+        label=el.get("label", ""),
+        is_content=el.get("is_content", "False") == "True",
+    )
+    for child_el in el.findall("node"):
+        child = element_to_subtree(child_el)
+        node.add_child(child)
+    return node
+
+
+
 
 def _serialize_edit_script(script: EditScript) -> ElementTree:
     root = Element("edit_script")
@@ -298,6 +349,12 @@ def _serialize_edit_script(script: EditScript) -> ElementTree:
             op_el.set("target_label", op.target_label)
         if op.string_edit_distance is not None:
             op_el.set("string_edit_distance", str(op.string_edit_distance))
+        if op.position is not None:
+            op_el.set("position", str(op.position))
+        if op.subtree_xml is not None:
+            subtree_wrapper = SubElement(op_el, "subtree")
+            subtree_el = ET.fromstring(op.subtree_xml)
+            subtree_wrapper.append(subtree_el)
 
     tree = ElementTree(root)
     indent(tree, space="  ")
@@ -315,62 +372,6 @@ def save_edit_script(script: EditScript) -> str:
     xml_tree.write(filepath, encoding="unicode", xml_declaration=True)
     return filepath
 
-def _clean_operations(operations: list[EditOperation], t1: TreeNode, t2: TreeNode) -> list[EditOperation]:
-    clean: list[EditOperation] = []
-
-    for op in operations:
-        if op.operation == "RENAME":
-            node = TreeUtils.get_node_by_path(t1, op.path)
-            if node is None or node.label != op.node_label:
-                continue
-            clean.append(op)
-
-        elif op.operation == "DELETE":
-            node = TreeUtils.get_node_by_path(t1, op.path)
-            if node is None:
-                continue
-            clean.append(op)
-
-        elif op.operation == "INSERT":
-            parent = TreeUtils.get_node_by_path(t1, op.path)
-            if parent is None:
-                continue
-            clean.append(op)
-
-    return clean
-
-def _sweep_missing_deletes(
-    operations: list[EditOperation], t1: TreeNode, t2: TreeNode
-) -> list[EditOperation]:
-    already_deleted = {tuple(op.path) for op in operations if op.operation == "DELETE"}
-    already_renamed = {tuple(op.path) for op in operations if op.operation == "RENAME"}
-
-    new_deletes: list[EditOperation] = []
-
-    def walk(node: TreeNode) -> None:
-        path = TreeUtils.get_path(node)
-        t2_node = TreeUtils.get_node_by_path(t2, path)
-        if (
-            t2_node is None
-            and tuple(path) not in already_deleted
-            and tuple(path) not in already_renamed
-        ):
-            ancestor_deleted = any(
-                tuple(path[:i]) in already_deleted
-                for i in range(1, len(path))
-            )
-            if not ancestor_deleted:
-                new_deletes.append(EditOperation(
-                    operation="DELETE",
-                    node_label=node.label,
-                    path=path,
-                    is_content=node.is_content,
-                ))
-        for child in node.children:
-            walk(child)
-
-    walk(t1)
-    return operations + new_deletes
 
 
 def compute_ted(t1: TreeNode, t2: TreeNode, source: str = "T1", target: str = "T2") -> EditScript:
@@ -383,17 +384,8 @@ def compute_ted(t1: TreeNode, t2: TreeNode, source: str = "T1", target: str = "T
     td, fd_store = _zhang_shasha(nodes1, nodes2, lm1, lm2)
 
     ted_score = td[len(nodes1) - 1][len(nodes2) - 1]
-    raw_operations = _extract_operations(td, fd_store, nodes1, nodes2, lm1, lm2)
-
-    raw_rename_count = sum(1 for op in raw_operations if op.operation == "RENAME")
-    raw_delete_count = sum(1 for op in raw_operations if op.operation == "DELETE")
-    raw_insert_count = sum(1 for op in raw_operations if op.operation == "INSERT")
-
-    print("RAW Renames:", raw_rename_count)
-    print("RAW Deletes:", raw_delete_count)
-    print("RAW Inserts:", raw_insert_count)
-
-    operations = _clean_operations(raw_operations, t1, t2)
+    mapping = _extract_mapping(td, fd_store, nodes1, nodes2, lm1, lm2)
+    operations = _mapping_to_operations(mapping, nodes1, nodes2)
 
     return EditScript(
         source_country=source,

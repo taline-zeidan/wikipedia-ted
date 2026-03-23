@@ -3,7 +3,7 @@ import copy
 import xml.etree.ElementTree as ET
 
 from models.tree import TreeNode, TreeUtils
-from src.ted import EditOperation, EditScript
+from src.ted import EditOperation, EditScript, element_to_subtree
 
 
 DIFFS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "diffs")
@@ -25,6 +25,15 @@ def _load_edit_script(filepath: str) -> EditScript:
         path_str = op_el.get("path", "")
         path = path_str.split("/") if path_str else []
         sed = op_el.get("string_edit_distance")
+        pos = op_el.get("position")
+
+        subtree_xml = None
+        subtree_wrapper = op_el.find("subtree")
+        if subtree_wrapper is not None:
+            node_el = subtree_wrapper.find("node")
+            if node_el is not None:
+                subtree_xml = ET.tostring(node_el, encoding="unicode")
+
         operations.append(EditOperation(
             operation=op_el.get("type", ""),
             node_label=op_el.get("node_label", ""),
@@ -32,6 +41,8 @@ def _load_edit_script(filepath: str) -> EditScript:
             target_label=op_el.get("target_label"),
             is_content=op_el.get("is_content", "False") == "True",
             string_edit_distance=int(sed) if sed is not None else None,
+            position=int(pos) if pos is not None else None,
+            subtree_xml=subtree_xml,
         ))
 
     return EditScript(
@@ -44,12 +55,6 @@ def _load_edit_script(filepath: str) -> EditScript:
 
 def _get_node(root: TreeNode, path: list[str]) -> TreeNode | None:
     return TreeUtils.get_node_by_path(root, path)
-
-
-def _get_parent(root: TreeNode, path: list[str]) -> TreeNode | None:
-    if len(path) < 2:
-        return None
-    return TreeUtils.get_node_by_path(root, path[:-1])
 
 
 def _apply_rename(root: TreeNode, operation: EditOperation) -> None:
@@ -75,25 +80,19 @@ def _apply_insert(root: TreeNode, operation: EditOperation) -> None:
     parent = _get_node(root, operation.path)
     if parent is None:
         return
-    new_node = TreeNode(label=operation.node_label, is_content=operation.is_content)
-    parent.add_child(new_node)
 
+    if operation.subtree_xml is not None:
+        subtree_el = ET.fromstring(operation.subtree_xml)
+        new_node = element_to_subtree(subtree_el)
+    else:
+        new_node = TreeNode(label=operation.node_label, is_content=operation.is_content)
 
-def _prune_empty_structural_nodes(root: TreeNode) -> None:
-    changed = True
-    while changed:
-        changed = False
-        nodes = TreeUtils.postorder(root)
-        for node in nodes:
-            if (
-                not node.is_content
-                and node.parent is not None
-                and len(node.children) == 0
-            ):
-                node.parent.children.remove(node)
-                node.parent = None
-                changed = True
-                break
+    new_node.parent = parent
+    pos = operation.position
+    if pos is not None and 0 <= pos <= len(parent.children):
+        parent.children.insert(pos, new_node)
+    else:
+        parent.children.append(new_node)
 
 
 def _apply_operations(root: TreeNode, operations: list[EditOperation]) -> TreeNode:
@@ -107,9 +106,24 @@ def _apply_operations(root: TreeNode, operations: list[EditOperation]) -> TreeNo
     for op in sorted(deletes, key=lambda op: len(op.path), reverse=True):
         _apply_delete(root, op)
 
-    _prune_empty_structural_nodes(root)
+    subtree_inserts = [op for op in inserts if op.subtree_xml is not None]
+    leaf_inserts = [op for op in inserts if op.subtree_xml is None]
 
-    for op in inserts:
+    already_covered: set[str] = set()
+    for op in sorted(subtree_inserts, key=lambda op: len(op.path)):
+        key = "/".join(op.path) + "/" + op.node_label
+        _apply_insert(root, op)
+        already_covered.add(key)
+
+    for op in sorted(leaf_inserts, key=lambda op: len(op.path)):
+        parent_key = "/".join(op.path)
+        is_child_of_subtree = False
+        for covered in already_covered:
+            if parent_key.startswith(covered):
+                is_child_of_subtree = True
+                break
+        if is_child_of_subtree:
+            continue
         _apply_insert(root, op)
 
     return root

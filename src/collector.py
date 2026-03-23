@@ -76,15 +76,30 @@ def _fetch_wikitext(country_name: str) -> str:
     return page["revisions"][0]["slots"]["main"]["*"]
 
 
+def _normalize_template_name(name: str) -> str:
+    return re.sub(r"[\s_]+", " ", name.strip().lower())
+
+
+INFOBOX_PATTERNS = [
+    "infobox country",
+    "infobox former country",
+    "infobox sovereign state",
+    "infobox nation",
+]
+
+
 def _extract_infobox(wikitext: str) -> dict[str, str]:
     parsed = mwparserfromhell.parse(wikitext)
-    templates = parsed.filter_templates()
+    templates = parsed.filter_templates(recursive=True)
 
     infobox = None
     for template in templates:
-        name = template.name.strip().lower()
-        if "infobox country" in name or "infobox former country" in name:
-            infobox = template
+        normalized = _normalize_template_name(str(template.name))
+        for pattern in INFOBOX_PATTERNS:
+            if pattern in normalized:
+                infobox = template
+                break
+        if infobox is not None:
             break
 
     if infobox is None:
