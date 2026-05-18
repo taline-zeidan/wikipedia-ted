@@ -7,9 +7,13 @@ Tabs:
   1. Similarity Matrix: heatmap + scannable sample of the 193x193 matrix
   2. Agglomerative: bottom-up hierarchical clustering + dendrogram table
   3. K-Means: partitional clustering with multiple restarts
-  4. Comparison: side-by-side algorithm comparison using Dunn Index
+  4. Comparison: side-by-side algorithm comparison using intra- and
+     inter-cluster similarity (Ch. 10, slides 75-81).
 
-Evaluation uses the Dunn Index (internal measure, no external ground truth).
+Evaluation uses two internal measures (no external ground truth):
+  - Intra-cluster similarity (PGMA): higher means more coherent clusters.
+  - Inter-cluster similarity (average-link, averaged over cluster pairs):
+    lower means more distinct clusters.
 """
 
 import json
@@ -95,18 +99,20 @@ def _build_heatmap(
     return fig
 
 
-def _compute_medoid(cluster: list[str], matrix: dict) -> str:
-    """Find the cluster member with highest average similarity to all others."""
-    if len(cluster) == 1:
-        return cluster[0]
-    best = cluster[0]
-    best_avg = -1.0
-    for candidate in cluster:
-        avg = sum(matrix[candidate][other] for other in cluster) / len(cluster)
-        if avg > best_avg:
-            best_avg = avg
-            best = candidate
-    return best
+def _avg_similarity_to_cluster(
+    country: str,
+    cluster: list[str],
+    matrix: dict,
+) -> float:
+    """
+    Average similarity of a single country to the OTHER members of its cluster.
+    A legitimate per-country quality indicator for any clustering algorithm —
+    does not require designating any cluster member as a centroid/medoid.
+    """
+    others = [c for c in cluster if c != country]
+    if not others:
+        return 1.0  # Singleton: trivially "perfectly similar to its cluster"
+    return sum(matrix[country][o] for o in others) / len(others)
 
 
 def _cluster_table(
@@ -114,45 +120,85 @@ def _cluster_table(
     medoids: list[str] | None = None,
     matrix: dict | None = None,
 ) -> pd.DataFrame:
-    """Build a DataFrame of cluster assignments with medoid and similarity info."""
-    if medoids is None and matrix is not None:
-        medoids = [_compute_medoid(c, matrix) for c in clusters]
+    """
+    Build a DataFrame of cluster assignments.
 
-    medoid_map = {}
-    if medoids:
-        for i, medoid in enumerate(medoids):
-            medoid_map[i] = medoid
+    Two modes (chosen by whether `medoids` is supplied):
 
+    K-Means mode  — medoids is not None:
+        Columns: Cluster, Country, Role ('medoid' or ''), Sim to Medoid, Cluster Size
+        Used by K-Means, which by construction has a designated medoid per cluster
+        (Lecture 10 §5.1 — the medoid is the similarity-matrix equivalent of the
+        K-Means centroid).
+
+    Agglomerative mode — medoids is None:
+        Columns: Cluster, Country, Avg Sim in Cluster, Cluster Size
+        Used by Agglomerative Hierarchical Clustering (Lecture 10 §5.2), which has
+        NO medoid concept — it merges clusters based on inter-cluster similarity
+        and never designates a representative member. The 'Avg Sim in Cluster'
+        column shows each country's average similarity to the other members of
+        its cluster, which is a meaningful per-country quality indicator that
+        does not require inventing a medoid.
+    """
+    if medoids is not None:
+        # K-Means mode
+        rows = []
+        for i, cluster in enumerate(clusters):
+            medoid = medoids[i] if i < len(medoids) else ""
+            for country in sorted(cluster):
+                if country == medoid:
+                    sim = "1.0000"
+                elif matrix and medoid:
+                    sim = f"{matrix[country][medoid]:.4f}"
+                else:
+                    sim = ""
+                rows.append({
+                    "Cluster": i + 1,
+                    "Country": country,
+                    "Role": "medoid" if country == medoid else "",
+                    "Sim to Medoid": sim,
+                    "Cluster Size": len(cluster),
+                })
+        return pd.DataFrame(rows)
+
+    # Agglomerative mode — no medoids
     rows = []
     for i, cluster in enumerate(clusters):
-        medoid = medoid_map.get(i, "")
         for country in sorted(cluster):
-            sim = ""
-            if matrix and medoid and country != medoid:
-                sim = f"{matrix[country][medoid]:.4f}"
-            elif country == medoid:
-                sim = "1.0000"
+            if matrix:
+                avg_sim = f"{_avg_similarity_to_cluster(country, cluster, matrix):.4f}"
+            else:
+                avg_sim = ""
             rows.append({
                 "Cluster": i + 1,
                 "Country": country,
-                "Role": "medoid" if country == medoid else "",
-                "Sim to Medoid": sim,
+                "Avg Sim in Cluster": avg_sim,
                 "Cluster Size": len(cluster),
             })
     return pd.DataFrame(rows)
 
 
-def _dunn_card(eval_result, label: str = "") -> None:
-    """Render a Dunn Index metric card in the Streamlit UI."""
+def _eval_card(eval_result, label: str = "") -> None:
+    """Render an intra-/inter-cluster similarity metric card in the Streamlit UI."""
     prefix = f"{label} - " if label else ""
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric(
-        f"{prefix}Dunn Index",
-        f"{eval_result.dunn_index:.4f}",
-        help="Higher is better. Ratio of min inter-cluster distance to max intra-cluster diameter.",
+        f"{prefix}Intra-cluster similarity",
+        f"{eval_result.intra_cluster_similarity:.4f}",
+        help=(
+            "PGMA (Pair Group Method Average): sum over clusters of the average "
+            "pairwise similarity inside each cluster. HIGHER is better "
+            "(more coherent clusters)."
+        ),
     )
-    col2.metric("Min inter-cluster dist", f"{eval_result.min_inter_dist:.4f}")
-    col3.metric("Max intra-cluster diam", f"{eval_result.max_intra_diam:.4f}")
+    col2.metric(
+        f"{prefix}Inter-cluster similarity",
+        f"{eval_result.inter_cluster_similarity:.4f}",
+        help=(
+            "Average of average-link similarities over all cluster pairs. "
+            "LOWER is better (more distinct clusters)."
+        ),
+    )
     st.caption(
         f"{eval_result.n_clusters} clusters · {eval_result.n_objects} countries evaluated"
     )
@@ -206,7 +252,11 @@ def _build_cluster_map(
     clusters: list[list[str]],
     title: str = "Cluster Map",
 ) -> go.Figure:
-    """Build a Plotly choropleth map color-coded by cluster assignment."""
+    """Build a Plotly choropleth map color-coded by cluster assignment.
+
+    Uses CLUSTER_PALETTE indexed by cluster number so the same cluster
+    gets the same color in the map AND in the pie chart on the same tab.
+    """
     rows = []
     for i, cluster in enumerate(clusters):
         for country in cluster:
@@ -223,12 +273,21 @@ def _build_cluster_map(
     if df.empty:
         return go.Figure()
 
+    # Explicit category-to-color map keyed by "Cluster N", matching the
+    # labels used in the pie chart. This guarantees a 1:1 color alignment
+    # across views, even if Plotly reorders categories internally.
+    cluster_color_map = {
+        f"Cluster {i + 1}": CLUSTER_PALETTE[i % len(CLUSTER_PALETTE)]
+        for i in range(len(clusters))
+    }
+
     fig = px.choropleth(
         df,
         locations="ISO",
         color="Cluster",
         hover_name="Country",
-        color_discrete_sequence=px.colors.qualitative.Set2,
+        color_discrete_map=cluster_color_map,
+        category_orders={"Cluster": list(cluster_color_map.keys())},
         title=title,
     )
     fig.update_layout(
@@ -371,19 +430,28 @@ with tab1:
         "Use the sample viewer to inspect any subset without loading the full heatmap."
     )
 
-    col_info, col_btn = st.columns([4, 1])
-    with col_btn:
-        if st.button("Build / Refresh Matrix", type="primary"):
-            with st.spinner(
-                "Computing similarity matrix for 193 countries. "
-                "this will take several minutes..."
-            ):
-                try:
-                    build_matrix(WORKING_SET, overwrite=True)
-                    st.success("Matrix built and cached successfully.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Error building matrix: {exc}")
+    st.markdown("**Matrix actions:**")
+    col_btn_1, col_btn_2, col_spacer = st.columns([1.6, 1.6, 2])
+    with col_btn_1:
+        do_recompute = st.button(
+            "Recompute Matrix",
+            help=(
+                "Recompute all TED similarity pairs using the XML files already "
+                "on disk. Use this if you changed the preprocessor or TED code "
+                "but the underlying Wikipedia data is still fine. "
+                "Does NOT contact Wikipedia."
+            ),
+        )
+    with col_btn_2:
+        do_rescrape = st.button(
+            "Re-scrape + Recompute",
+            type="primary",
+            help=(
+                "Fetch fresh infoboxes from Wikipedia for every country, then "
+                "recompute the full similarity matrix. Use this when you want "
+                "current Wikipedia data. Takes several minutes."
+            ),
+        )
 
     if do_recompute:
         with st.spinner("Recomputing similarity matrix from cached XML files..."):
@@ -511,8 +579,8 @@ with tab1:
 with tab2:
     st.header("Agglomerative Hierarchical Clustering")
     st.caption(
-        "Bottom-up clustering using average-link similarity. "
-        "Builds a full dendrogram; cut at k clusters or a similarity threshold."
+        "Bottom-up hierarchical clustering. Choose a linkage method and a cut method "
+        "(by k clusters or by similarity threshold)."
     )
 
     matrix, countries, _ = _load_matrix_from_disk()
@@ -520,6 +588,23 @@ with tab2:
     if matrix is None:
         st.info("Build the similarity matrix first (Matrix tab).")
     else:
+        # Linkage selector (Ch. 10, slides 79-81)
+        _LINKAGE_LABELS = {
+            "average": "Average link (avg) - most robust against noise, most widely used",
+            "complete": "Complete link (min) - compact clusters, tends to break large ones",
+            "single":   "Single link (max)   - handles non-globular shapes, can chain long/skinny clusters",
+        }
+        agg_linkage = st.selectbox(
+            "Linkage method",
+            options=list(_LINKAGE_LABELS.keys()),
+            index=0,  # default: average
+            format_func=lambda key: _LINKAGE_LABELS[key],
+            help=(
+                "Inter-cluster similarity rule used when choosing which two clusters "
+                "to merge at each step (Ch. 10, slides 79-81)."
+            ),
+        )
+
         col1, col2 = st.columns(2)
         with col1:
             cut_method = st.radio(
@@ -529,7 +614,14 @@ with tab2:
         with col2:
             if cut_method == "Number of clusters (k)":
                 agg_k = st.slider(
-                    "k", min_value=2, max_value=min(20, len(countries)), value=7
+                    "k",
+                    min_value=2,
+                    max_value=len(countries),
+                    value=min(7, len(countries)),
+                    help=(
+                        "Number of output clusters. Range goes from 2 up to the "
+                        "number of countries (each country in its own cluster)."
+                    ),
                 )
                 agg_threshold = None
             else:
@@ -550,7 +642,9 @@ with tab2:
                         if agg_k is not None
                         else {"threshold": agg_threshold}
                     )
-                    agg_result = agglomerative(matrix, countries, **kwargs)
+                    agg_result = agglomerative(
+                        matrix, countries, linkage=agg_linkage, **kwargs
+                    )
                     st.session_state["agg_result"] = agg_result
                     st.session_state["agg_matrix"] = matrix
                     st.session_state["agg_countries"] = countries
@@ -629,15 +723,17 @@ with tab2:
                     hide_index=True,
                 )
 
-            # Internal evaluation: Dunn Index
-            st.subheader("Internal Evaluation: Dunn Index")
+            # Internal evaluation: intra- and inter-cluster similarity
+            st.subheader("Internal Evaluation: Intra- and Inter-cluster Similarity")
             st.caption(
-                "Dunn Index = min inter-cluster distance / max intra-cluster diameter. "
-                "Higher means clusters are well-separated and compact."
+                "Intra-cluster similarity (PGMA): sum over clusters of the average "
+                "pairwise similarity inside each cluster. Higher is better. "
+                "Inter-cluster similarity: average of average-link similarities over "
+                "all cluster pairs. Lower is better. (Ch. 10, slides 75-81.)"
             )
             try:
                 eval_result = evaluate(result.flat_clusters, agg_matrix)
-                _dunn_card(eval_result)
+                _eval_card(eval_result)
             except ValueError as exc:
                 st.warning(str(exc))
 
@@ -662,8 +758,12 @@ with tab3:
             km_k = st.slider(
                 "Number of clusters (k)",
                 min_value=2,
-                max_value=min(20, len(countries)),
-                value=7,
+                max_value=len(countries),
+                value=min(7, len(countries)),
+                help=(
+                    "Number of output clusters. Range goes from 2 up to the "
+                    "number of countries (each country in its own cluster)."
+                ),
             )
         with col2:
             km_runs = st.slider("Random restarts", min_value=1, max_value=20, value=5)
@@ -739,15 +839,17 @@ with tab3:
             )
             st.plotly_chart(map_fig, use_container_width=True)
 
-            # Internal evaluation: Dunn Index
-            st.subheader("Internal Evaluation: Dunn Index")
+            # Internal evaluation: intra- and inter-cluster similarity
+            st.subheader("Internal Evaluation: Intra- and Inter-cluster Similarity")
             st.caption(
-                "Dunn Index = min inter-cluster distance / max intra-cluster diameter. "
-                "Higher means clusters are well-separated and compact."
+                "Intra-cluster similarity (PGMA): sum over clusters of the average "
+                "pairwise similarity inside each cluster. Higher is better. "
+                "Inter-cluster similarity: average of average-link similarities over "
+                "all cluster pairs. Lower is better. (Ch. 10, slides 75-81.)"
             )
             try:
                 eval_result = evaluate(result.clusters, km_matrix)
-                _dunn_card(eval_result)
+                _eval_card(eval_result)
             except ValueError as exc:
                 st.warning(str(exc))
 
@@ -759,7 +861,8 @@ with tab4:
     st.header("Algorithm Comparison & Evaluation")
     st.caption(
         "Run both algorithms with the same k and compare cluster assignments "
-        "and Dunn Index scores side by side."
+        "and internal evaluation metrics (intra- and inter-cluster similarity) "
+        "side by side."
     )
 
     matrix, countries, _ = _load_matrix_from_disk()
@@ -767,14 +870,33 @@ with tab4:
     if matrix is None:
         st.info("Build the similarity matrix first (Matrix tab).")
     else:
+        # Linkage selector for the agglomerative side of the comparison
+        _CMP_LINKAGE_LABELS = {
+            "average": "Average link (avg) - most robust, most widely used",
+            "complete": "Complete link (min) - compact clusters",
+            "single":   "Single link (max)   - handles non-globular shapes",
+        }
+        compare_linkage = st.selectbox(
+            "Agglomerative linkage method",
+            options=list(_CMP_LINKAGE_LABELS.keys()),
+            index=0,  # default: average
+            format_func=lambda key: _CMP_LINKAGE_LABELS[key],
+            key="compare_linkage",
+            help="Linkage method used by the agglomerative side of this comparison.",
+        )
+
         col1, col2 = st.columns(2)
         with col1:
             compare_k = st.slider(
                 "Number of clusters (k)",
                 min_value=2,
-                max_value=min(20, len(countries)),
-                value=7,
+                max_value=len(countries),
+                value=min(7, len(countries)),
                 key="compare_k",
+                help=(
+                    "Number of output clusters. Range goes from 2 up to the "
+                    "number of countries (each country in its own cluster)."
+                ),
             )
         with col2:
             compare_runs = st.slider(
@@ -788,7 +910,9 @@ with tab4:
         if st.button("Run Both Algorithms", type="primary"):
             with st.spinner("Running Agglomerative..."):
                 try:
-                    agg = agglomerative(matrix, countries, k=compare_k)
+                    agg = agglomerative(
+                        matrix, countries, k=compare_k, linkage=compare_linkage
+                    )
                 except Exception as exc:
                     st.error(f"Agglomerative error: {exc}")
                     st.stop()
@@ -827,11 +951,12 @@ with tab4:
                     hide_index=True,
                 )
 
-            # Dunn Index comparison
-            st.subheader("Internal Evaluation: Dunn Index Comparison")
+            # Internal evaluation comparison: intra- and inter-cluster similarity
+            st.subheader("Internal Evaluation: Intra- and Inter-cluster Similarity")
             st.caption(
-                "The Dunn Index is an internal measure. No external "
-                "reference data needed. Higher = more compact, better-separated clusters."
+                "Internal measures (Ch. 10, slides 75-81). No external reference "
+                "data needed. Intra-cluster similarity (PGMA) HIGHER is better; "
+                "inter-cluster similarity LOWER is better."
             )
 
             try:
@@ -844,48 +969,45 @@ with tab4:
             # Metric summary table
             metrics_df = pd.DataFrame({
                 "Metric": [
-                    "Dunn Index",
-                    "Min inter-cluster dist",
-                    "Max intra-cluster diam",
+                    "Intra-cluster similarity (higher = better)",
+                    "Inter-cluster similarity (lower = better)",
                     "Clusters",
                     "Countries",
                 ],
                 "Agglomerative": [
-                    agg_eval.dunn_index,
-                    agg_eval.min_inter_dist,
-                    agg_eval.max_intra_diam,
+                    agg_eval.intra_cluster_similarity,
+                    agg_eval.inter_cluster_similarity,
                     agg_eval.n_clusters,
                     agg_eval.n_objects,
                 ],
                 "K-Means": [
-                    km_eval.dunn_index,
-                    km_eval.min_inter_dist,
-                    km_eval.max_intra_diam,
+                    km_eval.intra_cluster_similarity,
+                    km_eval.inter_cluster_similarity,
                     km_eval.n_clusters,
                     km_eval.n_objects,
                 ],
             })
             st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
-            # Bar chart: Dunn Index only
+            # Bar chart: intra and inter side by side for both algorithms
             fig = go.Figure()
             fig.add_trace(go.Bar(
                 name="Agglomerative",
-                x=["Dunn Index", "Min inter dist", "Max intra diam"],
-                y=[agg_eval.dunn_index, agg_eval.min_inter_dist, agg_eval.max_intra_diam],
+                x=["Intra-cluster similarity", "Inter-cluster similarity"],
+                y=[agg_eval.intra_cluster_similarity, agg_eval.inter_cluster_similarity],
                 marker_color="#2196F3",
             ))
             fig.add_trace(go.Bar(
                 name="K-Means",
-                x=["Dunn Index", "Min inter dist", "Max intra diam"],
-                y=[km_eval.dunn_index, km_eval.min_inter_dist, km_eval.max_intra_diam],
+                x=["Intra-cluster similarity", "Inter-cluster similarity"],
+                y=[km_eval.intra_cluster_similarity, km_eval.inter_cluster_similarity],
                 marker_color="#4CAF50",
             ))
             fig.update_layout(
                 barmode="group",
-                title=f"Dunn Index Comparison (k={compare_k})",
+                title=f"Intra- and Inter-cluster Similarity Comparison (k={compare_k})",
                 height=400,
-                yaxis_title="Value",
+                yaxis_title="Similarity",
             )
             st.plotly_chart(fig, use_container_width=True)
 

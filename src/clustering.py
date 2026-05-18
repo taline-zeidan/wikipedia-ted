@@ -4,7 +4,7 @@ Clustering Algorithms (Project 2)
 Implements two clustering algorithms:
 
   1. Agglomerative Hierarchical Clustering
-     - Bottom-up, average-link inter-cluster similarity
+     - Bottom-up; user chooses linkage method: single, complete, or average
      - Builds a full dendrogram; user cuts at k or a similarity threshold
 
   2. K-Means Partitional Clustering
@@ -30,7 +30,7 @@ class MergeStep:
     """Records a single merge event in the agglomerative dendrogram."""
     cluster_a: list[str]
     cluster_b: list[str]
-    similarity: float          # Average-link similarity at merge time
+    similarity: float          # Inter-cluster similarity at merge time (linkage-dependent)
     merged: list[str]          # Combined cluster after the merge
 
 
@@ -132,10 +132,45 @@ def _average_link_similarity(
     """
     Average-link inter-cluster similarity.
     Cluster similarity = average similarity of all cross-cluster pairs.
-    Most robust against noise; most widely used.
+    Most robust against noise; most widely used (Ch. 10, slide 81).
     """
     total = sum(matrix[a][b] for a in cluster_a for b in cluster_b)
     return total / (len(cluster_a) * len(cluster_b))
+
+
+def _single_link_similarity(
+    cluster_a: list[str],
+    cluster_b: list[str],
+    matrix: dict,
+) -> float:
+    """
+    Single-link inter-cluster similarity (Ch. 10, slide 79).
+    Cluster similarity = similarity of the two MOST similar cross-cluster objects
+    (i.e. the maximum). Can produce long, skinny clusters but handles non-globular
+    shapes well.
+    """
+    return max(matrix[a][b] for a in cluster_a for b in cluster_b)
+
+
+def _complete_link_similarity(
+    cluster_a: list[str],
+    cluster_b: list[str],
+    matrix: dict,
+) -> float:
+    """
+    Complete-link inter-cluster similarity (Ch. 10, slide 80).
+    Cluster similarity = similarity of the two LEAST similar cross-cluster objects
+    (i.e. the minimum). Produces compact clusters but tends to break large ones.
+    """
+    return min(matrix[a][b] for a in cluster_a for b in cluster_b)
+
+
+# Linkage method registry: name -> similarity function
+_LINKAGE_METHODS = {
+    "average": _average_link_similarity,
+    "single": _single_link_similarity,
+    "complete": _complete_link_similarity,
+}
 
 
 def agglomerative(
@@ -143,13 +178,15 @@ def agglomerative(
     countries: list[str],
     k: int | None = None,
     threshold: float | None = None,
+    linkage: str = "average",
 ) -> AgglomerativeResult:
     """
     Agglomerative hierarchical clustering:
 
     1. Initialise: each object is its own cluster.
     2. Repeat:
-       a. Find the two clusters with maximum average-link similarity.
+       a. Find the two clusters with maximum inter-cluster similarity
+          (using the chosen linkage method).
        b. Merge them; record the merge step.
     3. Until one cluster remains (full dendrogram built).
     4. Cut the dendrogram at k clusters or at a similarity threshold.
@@ -159,12 +196,22 @@ def agglomerative(
         countries: List of country names to cluster.
         k:         Desired number of output clusters (mutually exclusive with threshold).
         threshold: Similarity threshold at which to stop merging.
+        linkage:   Inter-cluster similarity method: "average" (default), "single",
+                   or "complete". See Ch. 10, slides 79-81.
 
     Returns:
         AgglomerativeResult with full dendrogram and flat cluster cut.
     """
     if k is None and threshold is None:
         raise ValueError("Provide either k or threshold.")
+
+    if linkage not in _LINKAGE_METHODS:
+        raise ValueError(
+            f"Unknown linkage '{linkage}'. "
+            f"Choose from: {sorted(_LINKAGE_METHODS.keys())}."
+        )
+
+    link_fn = _LINKAGE_METHODS[linkage]
 
     clusters: list[list[str]] = [[c] for c in countries]
     dendrogram = Dendrogram()
@@ -175,7 +222,7 @@ def agglomerative(
 
         for i in range(len(clusters)):
             for j in range(i + 1, len(clusters)):
-                sim = _average_link_similarity(clusters[i], clusters[j], matrix)
+                sim = link_fn(clusters[i], clusters[j], matrix)
                 if sim > best_sim:
                     best_sim = sim
                     best_i, best_j = i, j
@@ -192,7 +239,11 @@ def agglomerative(
         clusters.append(merged)
 
     flat = dendrogram.cut_at_k(k) if k is not None else dendrogram.cut_at_threshold(threshold)
-    return AgglomerativeResult(dendrogram=dendrogram, flat_clusters=flat)
+    return AgglomerativeResult(
+        dendrogram=dendrogram,
+        flat_clusters=flat,
+        linkage=linkage,
+    )
 
 
 # ---------------------------------------------------------------------------
