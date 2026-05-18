@@ -45,14 +45,25 @@ MATRIX_PATH = os.path.join("data", "un_similarity_matrix_193.json")
 # Number of countries shown in the scannable matrix sample
 DEFAULT_SAMPLE_SIZE = 20
 
+# Single source of truth for cluster colors.
+# Used by the choropleth map AND both pie charts so that "Cluster N" is the
+# same color everywhere in the UI. Set2 + Set3 give us 20 distinct colors,
+# which covers k up to the slider's max (20).
+CLUSTER_PALETTE = (
+    list(px.colors.qualitative.Set2) + list(px.colors.qualitative.Set3)
+)
 
-def _load_matrix_from_disk() -> tuple[dict | None, list[str] | None]:
-    """Load the cached matrix from disk; return (None, None) if not found."""
+
+def _load_matrix_from_disk() -> tuple[dict | None, list[str] | None, list[str]]:
+    """Load the cached matrix from disk; return (None, None, []) if not found.
+
+    Returns (matrix, countries, skipped).
+    """
     if not os.path.exists(MATRIX_PATH):
-        return None, None
+        return None, None, []
     with open(MATRIX_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data["matrix"], data["countries"]
+    return data["matrix"], data["countries"], data.get("skipped", [])
 
 
 def _build_heatmap(
@@ -374,17 +385,62 @@ with tab1:
                 except Exception as exc:
                     st.error(f"Error building matrix: {exc}")
 
-    matrix, countries = _load_matrix_from_disk()
+    if do_recompute:
+        with st.spinner("Recomputing similarity matrix from cached XML files..."):
+            try:
+                build_matrix(WORKING_SET, overwrite=True, rescrape=False)
+                st.success("Matrix recomputed and cached successfully.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error recomputing matrix: {exc}")
+
+    if do_rescrape:
+        with st.spinner(
+            "Re-scraping Wikipedia and recomputing the matrix. "
+            "This takes several minutes — proactive 1 req/s pacing is enforced "
+            "to stay under Wikipedia's rate limit."
+        ):
+            try:
+                build_matrix(WORKING_SET, overwrite=True, rescrape=True)
+                st.success("Matrix rebuilt from fresh Wikipedia data and cached.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Error rebuilding matrix: {exc}")
+
+    matrix, countries, skipped = _load_matrix_from_disk()
 
     if matrix is None:
         st.info(
-            "No cached matrix found. Click **Build / Refresh Matrix** to compute it. "
-            f"This will process {len(WORKING_SET)} UN member countries."
+            "No cached matrix found. Click one of the buttons above to compute it. "
+            f"The full working set has {len(WORKING_SET)} UN member countries."
         )
     else:
         n = len(countries)
         n_pairs = n * (n - 1) // 2
-        st.success(f"Matrix loaded: **{n} countries** · **{n_pairs:,} pairs**")
+        expected = len(WORKING_SET)
+        if n == expected:
+            st.success(
+                f"Matrix loaded: **{n} countries** · **{n_pairs:,} pairs** "
+                f"(full working set)"
+            )
+        else:
+            st.warning(
+                f"Matrix loaded: **{n} of {expected} countries** · "
+                f"**{n_pairs:,} pairs**. "
+                f"{len(skipped)} countries were skipped during build "
+                f"(no infobox / failed validation). Clustering proceeds on "
+                f"the {n} countries that loaded successfully."
+            )
+
+        if skipped:
+            with st.expander(f"Skipped countries ({len(skipped)})"):
+                st.write(", ".join(sorted(skipped)))
+                st.caption(
+                    "These countries are excluded from the similarity matrix "
+                    "and from all clustering output (map, pie chart, dendrogram). "
+                    "Causes are typically: non-standard Wikipedia infobox, "
+                    "minimum-viability check failure, or repeated scrape errors."
+                )
 
         # Scannable sample
         st.subheader("Matrix Sample")
@@ -459,7 +515,7 @@ with tab2:
         "Builds a full dendrogram; cut at k clusters or a similarity threshold."
     )
 
-    matrix, countries = _load_matrix_from_disk()
+    matrix, countries, _ = _load_matrix_from_disk()
 
     if matrix is None:
         st.info("Build the similarity matrix first (Matrix tab).")
@@ -519,10 +575,17 @@ with tab2:
             with col_right:
                 sizes = [len(c) for c in result.flat_clusters]
                 labels = [f"Cluster {i+1}" for i in range(n_clusters)]
+                pie_color_map = {
+                    labels[i]: CLUSTER_PALETTE[i % len(CLUSTER_PALETTE)]
+                    for i in range(n_clusters)
+                }
                 fig = px.pie(
                     values=sizes,
                     names=labels,
                     title="Cluster size distribution",
+                    color=labels,
+                    color_discrete_map=pie_color_map,
+                    category_orders={"names": labels},
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -589,7 +652,7 @@ with tab3:
         "Multiple restarts; best result by intra-cluster similarity is kept."
     )
 
-    matrix, countries = _load_matrix_from_disk()
+    matrix, countries, _ = _load_matrix_from_disk()
 
     if matrix is None:
         st.info("Build the similarity matrix first (Matrix tab).")
@@ -654,8 +717,17 @@ with tab3:
                     f"Cluster {i+1} [{result.medoids[i]}]"
                     for i in range(len(result.clusters))
                 ]
+                pie_color_map = {
+                    labels[i]: CLUSTER_PALETTE[i % len(CLUSTER_PALETTE)]
+                    for i in range(len(result.clusters))
+                }
                 fig = px.pie(
-                    values=sizes, names=labels, title="Cluster size distribution"
+                    values=sizes,
+                    names=labels,
+                    title="Cluster size distribution",
+                    color=labels,
+                    color_discrete_map=pie_color_map,
+                    category_orders={"names": labels},
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -690,7 +762,7 @@ with tab4:
         "and Dunn Index scores side by side."
     )
 
-    matrix, countries = _load_matrix_from_disk()
+    matrix, countries, _ = _load_matrix_from_disk()
 
     if matrix is None:
         st.info("Build the similarity matrix first (Matrix tab).")

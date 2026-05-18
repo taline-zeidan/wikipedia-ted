@@ -64,6 +64,27 @@ INFOBOX_PATTERNS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Rate limiting
+#
+# Wikipedia's etiquette for unauthenticated API access is ~1 request/second.
+# We enforce this proactively (between every request) rather than only
+# reacting to HTTP 429 after we've already been throttled.
+# ---------------------------------------------------------------------------
+
+MIN_REQUEST_INTERVAL = 1.0  # seconds between successive Wikipedia requests
+_last_request_time: float = 0.0
+
+
+def _throttle() -> None:
+    """Block until at least MIN_REQUEST_INTERVAL has passed since the last call."""
+    global _last_request_time
+    now = time.monotonic()
+    elapsed = now - _last_request_time
+    if elapsed < MIN_REQUEST_INTERVAL:
+        time.sleep(MIN_REQUEST_INTERVAL - elapsed)
+    _last_request_time = time.monotonic()
+
+# ---------------------------------------------------------------------------
 # Wikipedia name overrides
 #
 # Maps our canonical country name → the exact Wikipedia page title.
@@ -240,6 +261,9 @@ def _fetch_wikitext(country_name: str) -> str:
 
     Uses WIKIPEDIA_NAME_OVERRIDES to resolve the correct page title when
     our canonical name differs from Wikipedia's.
+
+    Enforces proactive rate limiting (1 req/s) and handles HTTP 429
+    by honoring the Retry-After header before raising.
     """
     wiki_title = _resolve_wikipedia_title(country_name)
     params = {
@@ -251,9 +275,26 @@ def _fetch_wikitext(country_name: str) -> str:
         "titles": wiki_title,
         "redirects": 1,
     }
+
+    _throttle()
     response = requests.get(
         MEDIAWIKI_API, params=params, headers=API_HEADERS, timeout=15
     )
+
+    # Handle explicit rate-limiting: respect Wikipedia's Retry-After header,
+    # then signal failure so collect_all's retry loop kicks in.
+    if response.status_code == 429:
+        retry_after = response.headers.get("Retry-After", "5")
+        try:
+            wait = float(retry_after)
+        except ValueError:
+            wait = 5.0
+        print(f"[collector] 429 for '{wiki_title}', server asked to wait {wait}s")
+        time.sleep(wait)
+        raise requests.HTTPError(
+            f"429 Too Many Requests for '{wiki_title}' (waited {wait}s)"
+        )
+
     response.raise_for_status()
     data = response.json()
 
@@ -387,9 +428,13 @@ def collect_all(overwrite: bool = False) -> dict[str, str]:
     """
     Scrape infoboxes for all UN member states.
 
-    Uses exponential backoff (up to 4 retries) to handle Wikipedia
+    Uses exponential backoff (up to 5 attempts) to handle Wikipedia
     rate-limiting (HTTP 429). Countries that fail after all retries are
     recorded with an "ERROR: …" value in the returned dict.
+
+    Proactive 1 req/s throttling is enforced by _throttle() inside
+    _fetch_wikitext; backoff here is the fallback when 429s slip through
+    or other transient errors occur.
 
     Args:
         overwrite: Re-scrape countries that already have a local XML file.
@@ -398,8 +443,8 @@ def collect_all(overwrite: bool = False) -> dict[str, str]:
         Dict mapping canonical country name → file path or "ERROR: …".
     """
     results: dict[str, str] = {}
-    max_retries = 4
-    base_delay = 3  # seconds
+    max_retries = 5
+    base_delay = 5  # seconds; doubles each retry: 5, 10, 20, 40, 80
 
     for country in UN_MEMBER_STATES:
         last_error = None
@@ -414,7 +459,7 @@ def collect_all(overwrite: bool = False) -> dict[str, str]:
             except Exception as exc:
                 last_error = exc
                 if attempt < max_retries - 1:
-                    delay = base_delay * (attempt + 1)
+                    delay = base_delay * (2 ** attempt)
                     print(
                         f"[RETRY] {country} (attempt {attempt + 1}/{max_retries}): "
                         f"{exc}, retrying in {delay}s"

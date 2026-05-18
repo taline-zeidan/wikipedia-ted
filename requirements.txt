@@ -7,3 +7,5 @@ streamlit-agraph
 plotly
 matplotlib
 pandas
+pycountry
+scipy
