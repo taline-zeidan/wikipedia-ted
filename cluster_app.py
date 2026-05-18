@@ -8,7 +8,7 @@ Tabs:
   2. Agglomerative: bottom-up hierarchical clustering + dendrogram table
   3. K-Means: partitional clustering with multiple restarts
   4. Comparison: side-by-side algorithm comparison using intra- and
-     inter-cluster similarity (Ch. 10, slides 75-81).
+     inter-cluster similarity.
 
 Evaluation uses two internal measures (no external ground truth):
   - Intra-cluster similarity (PGMA): higher means more coherent clusters.
@@ -40,7 +40,6 @@ st.set_page_config(
 )
 
 st.title("Wikipedia Infobox Country Clustering")
-st.caption("COE 543/743 · Project 2 · Lebanese American University · Spring 2026")
 
 # Shared helpers
 
@@ -737,10 +736,10 @@ with tab2:
             # Internal evaluation: intra- and inter-cluster similarity
             st.subheader("Internal Evaluation: Intra- and Inter-cluster Similarity")
             st.caption(
-                "Intra-cluster similarity (PGMA): sum over clusters of the average "
+                "Intra-cluster similarity: sum over clusters of the average "
                 "pairwise similarity inside each cluster. Higher is better. "
                 "Inter-cluster similarity: average of average-link similarities over "
-                "all cluster pairs. Lower is better. (Ch. 10, slides 75-81.)"
+                "all cluster pairs."
             )
             try:
                 eval_result = evaluate(result.flat_clusters, agg_matrix)
@@ -853,10 +852,10 @@ with tab3:
             # Internal evaluation: intra- and inter-cluster similarity
             st.subheader("Internal Evaluation: Intra- and Inter-cluster Similarity")
             st.caption(
-                "Intra-cluster similarity (PGMA): sum over clusters of the average "
+                "Intra-cluster similarity: sum over clusters of the average "
                 "pairwise similarity inside each cluster. Higher is better. "
                 "Inter-cluster similarity: average of average-link similarities over "
-                "all cluster pairs. Lower is better. (Ch. 10, slides 75-81.)"
+                "all cluster pairs."
             )
             try:
                 eval_result = evaluate(result.clusters, km_matrix)
@@ -969,7 +968,7 @@ with tab4:
             # Internal evaluation comparison: intra- and inter-cluster similarity
             st.subheader("Internal Evaluation: Intra- and Inter-cluster Similarity")
             st.caption(
-                "Internal measures (Ch. 10, slides 75-81). No external reference "
+                "Internal measures. No external reference "
                 "data needed. Intra-cluster similarity (PGMA) HIGHER is better; "
                 "inter-cluster similarity LOWER is better."
             )
