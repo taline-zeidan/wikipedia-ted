@@ -44,6 +44,7 @@ INFOBOX_PATTERNS = [
     "infobox former country",
     "infobox sovereign state",
     "infobox nation",
+    "infobox political division",
 ]
 
 

@@ -518,13 +518,24 @@ with tab1:
             "use this to inspect specific subsets."
         )
 
-        sample_size = st.slider(
-            "Sample size (countries)",
-            min_value=5,
-            max_value=min(50, n),
-            value=min(DEFAULT_SAMPLE_SIZE, n),
-            step=5,
-        )
+        max_sample = n # min(50, n)
+        min_sample = 1 # min(5, max_sample)
+
+        if min_sample >= max_sample:
+            sample_size = max_sample
+            st.caption(
+                f"Sample size: **{sample_size}** — matrix has only {n} "
+                f"{'country' if n == 1 else 'countries'}, so the full set is shown."
+            )
+        else:
+            step = 1
+            sample_size = st.slider(
+                "Sample size (countries)",
+                min_value=min_sample,
+                max_value=max_sample,
+                value=min(DEFAULT_SAMPLE_SIZE, max_sample),
+                step=step,
+            )
 
         selected_sample = st.multiselect(
             "Countries to include in sample (leave empty to use first N alphabetically)",
@@ -548,15 +559,15 @@ with tab1:
         )
 
         # Raw scores table
-        with st.expander(f"Raw scores for sample ({len(display_countries)}×{len(display_countries)})"):
-            sample_df = pd.DataFrame(
-                [[matrix[c1][c2] for c2 in display_countries] for c1 in display_countries],
-                index=display_countries,
-                columns=display_countries,
-            )
-            st.dataframe(sample_df.style.format("{:.4f}").background_gradient(
-                cmap="RdYlGn", vmin=0, vmax=1
-            ))
+        # with st.expander(f"Raw scores for sample ({len(display_countries)}×{len(display_countries)})"):
+        #     sample_df = pd.DataFrame(
+        #         [[matrix[c1][c2] for c2 in display_countries] for c1 in display_countries],
+        #         index=display_countries,
+        #         columns=display_countries,
+        #     )
+        #     st.dataframe(sample_df.style.format("{:.4f}").background_gradient(
+        #         cmap="RdYlGn", vmin=0, vmax=1
+        #     ))
 
         # Full matrix download
         with st.expander("Download full matrix as CSV"):
@@ -588,20 +599,20 @@ with tab2:
     if matrix is None:
         st.info("Build the similarity matrix first (Matrix tab).")
     else:
-        # Linkage selector (Ch. 10, slides 79-81)
+        # Linkage selector
         _LINKAGE_LABELS = {
-            "average": "Average link (avg) - most robust against noise, most widely used",
             "complete": "Complete link (min) - compact clusters, tends to break large ones",
+            "average": "Average link (avg) - most robust against noise, most widely used",
             "single":   "Single link (max)   - handles non-globular shapes, can chain long/skinny clusters",
         }
         agg_linkage = st.selectbox(
             "Linkage method",
             options=list(_LINKAGE_LABELS.keys()),
-            index=0,  # default: average
+            index=0,  # default: complete-link
             format_func=lambda key: _LINKAGE_LABELS[key],
             help=(
                 "Inter-cluster similarity rule used when choosing which two clusters "
-                "to merge at each step (Ch. 10, slides 79-81)."
+                "to merge at each step."
             ),
         )
 
@@ -757,11 +768,11 @@ with tab3:
         with col1:
             km_k = st.slider(
                 "Number of clusters (k)",
-                min_value=2,
+                min_value=1,
                 max_value=len(countries),
                 value=min(7, len(countries)),
                 help=(
-                    "Number of output clusters. Range goes from 2 up to the "
+                    "Number of output clusters. Range goes from 1 up to the "
                     "number of countries (each country in its own cluster)."
                 ),
             )
@@ -769,7 +780,7 @@ with tab3:
             km_runs = st.slider("Random restarts", min_value=1, max_value=20, value=5)
         with col3:
             km_max_iter = st.slider(
-                "Max iterations per run", min_value=10, max_value=500, value=100
+                "Max iterations per run", min_value=1, max_value=500, value=100
             )
 
         if st.button("Run K-Means Clustering", type="primary"):
@@ -885,7 +896,7 @@ with tab4:
             help="Linkage method used by the agglomerative side of this comparison.",
         )
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             compare_k = st.slider(
                 "Number of clusters (k)",
@@ -906,6 +917,10 @@ with tab4:
                 value=5,
                 key="compare_runs",
             )
+        with col3:
+            compare_max_iter = st.slider(
+                "Max iterations per K-Means run", min_value=1, max_value=500, value=100
+            )
 
         if st.button("Run Both Algorithms", type="primary"):
             with st.spinner("Running Agglomerative..."):
@@ -919,7 +934,7 @@ with tab4:
 
             with st.spinner(f"Running K-Means ({compare_runs} restarts)..."):
                 try:
-                    km = kmeans(matrix, countries, k=compare_k, n_runs=compare_runs)
+                    km = kmeans(matrix, countries, k=compare_k, max_iterations=compare_max_iter, n_runs=compare_runs)
                 except Exception as exc:
                     st.error(f"K-Means error: {exc}")
                     st.stop()

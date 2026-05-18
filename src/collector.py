@@ -14,6 +14,7 @@ Country name resolution:
   fallback is used if that fetch fails.
 """
 
+import argparse
 import os
 import re
 import time
@@ -61,6 +62,8 @@ INFOBOX_PATTERNS = [
     "infobox former country",
     "infobox sovereign state",
     "infobox nation",
+    # Denmark and the Netherlands use this on their main country articles.
+    "infobox political division",
 ]
 
 # ---------------------------------------------------------------------------
@@ -92,6 +95,9 @@ def _throttle() -> None:
 # ---------------------------------------------------------------------------
 
 WIKIPEDIA_NAME_OVERRIDES: dict[str, str] = {
+    # Disambiguation pages — UN list uses the short common name
+    "Georgia":                  "Georgia (country)",
+    "Ireland":                  "Republic of Ireland",
     # Wikipedia uses the full official name
     "Micronesia":               "Federated States of Micronesia",
     "Sao Tome and Principe":    "São Tomé and Príncipe",
@@ -424,29 +430,31 @@ def collect_country(country_name: str, overwrite: bool = False) -> str:
     return output_path
 
 
-def collect_all(overwrite: bool = False) -> dict[str, str]:
+def list_unscraped() -> list[str]:
     """
-    Scrape infoboxes for all UN member states.
+    Return UN member names that do not yet have a file in data/raw/.
 
-    Uses exponential backoff (up to 5 attempts) to handle Wikipedia
-    rate-limiting (HTTP 429). Countries that fail after all retries are
-    recorded with an "ERROR: …" value in the returned dict.
+    A country is considered scraped when its XML exists (same path rule as
+    collect_country). Failed scrapes with no file on disk are included.
+    """
+    return [
+        country
+        for country in UN_MEMBER_STATES
+        if not os.path.exists(_output_path(country))
+    ]
 
-    Proactive 1 req/s throttling is enforced by _throttle() inside
-    _fetch_wikitext; backoff here is the fallback when 429s slip through
-    or other transient errors occur.
 
-    Args:
-        overwrite: Re-scrape countries that already have a local XML file.
+def _collect_countries(countries: list[str], overwrite: bool = False) -> dict[str, str]:
+    """
+    Scrape a given list of countries with retry/backoff.
 
-    Returns:
-        Dict mapping canonical country name → file path or "ERROR: …".
+    See collect_all() for throttling and return-value semantics.
     """
     results: dict[str, str] = {}
     max_retries = 5
     base_delay = 5  # seconds; doubles each retry: 5, 10, 20, 40, 80
 
-    for country in UN_MEMBER_STATES:
+    for country in countries:
         last_error = None
 
         for attempt in range(max_retries):
@@ -473,5 +481,129 @@ def collect_all(overwrite: bool = False) -> dict[str, str]:
     return results
 
 
+def collect_missing() -> dict[str, str]:
+    """
+    Scrape only UN members that have no XML in data/raw yet.
+
+    Skips countries that already have a file (no Wikipedia request).
+    Use this to fill gaps after a partial run without re-fetching all 193.
+    """
+    missing = list_unscraped()
+    if not missing:
+        print(
+            f"[collector] Nothing to do: all {len(UN_MEMBER_STATES)} countries "
+            f"already have XML under {DATA_DIR}."
+        )
+        return {}
+
+    print(
+        f"[collector] Scraping {len(missing)} missing of "
+        f"{len(UN_MEMBER_STATES)} countries..."
+    )
+    return _collect_countries(missing, overwrite=False)
+
+
+def collect_countries(countries: list[str], overwrite: bool = False) -> dict[str, str]:
+    """
+    Scrape a specific list of UN member states (with retry/backoff).
+
+    Args:
+        countries: Canonical names as in UN_MEMBER_STATES (e.g. "France",
+                   "Congo, DR"). Unknown names raise ValueError.
+        overwrite: Re-scrape even when a local XML file already exists.
+
+    Returns:
+        Dict mapping country name → file path or "ERROR: …".
+    """
+    if not countries:
+        return {}
+
+    valid = set(UN_MEMBER_STATES)
+    unknown = [c for c in countries if c not in valid]
+    if unknown:
+        raise ValueError(
+            f"Unknown country name(s): {unknown}. "
+            "Names must match UN_MEMBER_STATES exactly "
+            "(run list(UN_MEMBER_STATES) or --list-missing)."
+        )
+
+    # Preserve caller order while dropping duplicates
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in countries:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+
+    print(f"[collector] Scraping {len(ordered)} selected countries...")
+    return _collect_countries(ordered, overwrite=overwrite)
+
+
+def collect_all(overwrite: bool = False) -> dict[str, str]:
+    """
+    Scrape infoboxes for all UN member states.
+
+    Uses exponential backoff (up to 5 attempts) to handle Wikipedia
+    rate-limiting (HTTP 429). Countries that fail after all retries are
+    recorded with an "ERROR: …" value in the returned dict.
+
+    Proactive 1 req/s throttling is enforced by _throttle() inside
+    _fetch_wikitext; backoff here is the fallback when 429s slip through
+    or other transient errors occur.
+
+    When overwrite=False, countries that already have XML are skipped
+    without calling Wikipedia (same as collect_missing for those files).
+
+    Args:
+        overwrite: Re-scrape countries that already have a local XML file.
+
+    Returns:
+        Dict mapping canonical country name → file path or "ERROR: …".
+    """
+    return _collect_countries(UN_MEMBER_STATES, overwrite=overwrite)
+
+
+def _parse_cli_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Scrape Wikipedia country infoboxes to data/raw/*.xml",
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--missing",
+        action="store_true",
+        help="Only countries without an XML file yet",
+    )
+    mode.add_argument(
+        "--list-missing",
+        action="store_true",
+        help="Print countries missing from data/raw and exit",
+    )
+    mode.add_argument(
+        "--countries",
+        "-c",
+        nargs="+",
+        metavar="NAME",
+        help='Specific UN members, e.g. -c France Germany "Congo, DR"',
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Re-fetch even when XML already exists (default: skip existing)",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    collect_all()
+    args = _parse_cli_args()
+
+    if args.list_missing:
+        missing = list_unscraped()
+        print(f"{len(missing)} missing (of {len(UN_MEMBER_STATES)}):")
+        for name in missing:
+            print(f"  {name}")
+    elif args.missing:
+        collect_missing()
+    elif args.countries:
+        collect_countries(args.countries, overwrite=args.overwrite)
+    else:
+        collect_all(overwrite=args.overwrite)

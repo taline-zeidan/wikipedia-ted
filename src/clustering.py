@@ -311,7 +311,6 @@ def _kmeans_single_run(
     countries: list[str],
     k: int,
     max_iterations: int,
-    seed: int,
 ) -> KMeansResult:
     """
     One full run of K-Means:
@@ -322,8 +321,7 @@ def _kmeans_single_run(
        b. Recompute medoids (object with highest avg similarity to cluster).
     3. Until no object changes cluster (convergence).
     """
-    rng = random.Random(seed)
-    medoids = rng.sample(countries, k)
+    medoids = random.sample(countries, k)
 
     for iteration in range(1, max_iterations + 1):
         clusters = _assign_to_medoids(countries, medoids, matrix)
@@ -376,7 +374,7 @@ def kmeans(
     K-Means with multiple random restarts to overcome dependency on
     initial centroids.
 
-    Runs the algorithm n_runs times with different random seeds.
+    Runs the algorithm n_runs times with independent random initial medoids.
     Returns the run with the highest total intra-cluster similarity,
     which corresponds to the lowest SSE.
 
@@ -400,8 +398,8 @@ def kmeans(
         raise ValueError(f"k must be between 1 and {len(countries)}.")
 
     best_result: KMeansResult | None = None
-    for run in range(n_runs):
-        result = _kmeans_single_run(matrix, countries, k, max_iterations, seed=run)
+    for _ in range(n_runs):
+        result = _kmeans_single_run(matrix, countries, k, max_iterations)
         if (
             best_result is None
             or result.intra_cluster_similarity > best_result.intra_cluster_similarity
