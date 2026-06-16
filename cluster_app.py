@@ -48,6 +48,16 @@ MATRIX_PATH = os.path.join("data", "un_similarity_matrix_193.json")
 # Number of countries shown in the scannable matrix sample
 DEFAULT_SAMPLE_SIZE = 20
 
+# Plotly mode bar: scroll wheel zoom + standard pan/zoom/reset
+DENDROGRAM_PLOT_CONFIG = {
+    "scrollZoom": True,
+    "displayModeBar": True,
+    "displaylogo": False,
+}
+
+# SciPy places leaves every 10 units; scale up for readable spacing in Plotly.
+DENDROGRAM_LEAF_SPACING = 16
+
 # Single source of truth for cluster colors.
 # Used by the choropleth map AND both pie charts so that "Cluster N" is the
 # same color everywhere in the UI. Set2 + Set3 give us 20 distinct colors,
@@ -338,21 +348,38 @@ def _merges_to_linkage(merges: list, all_countries: list[str]) -> np.ndarray:
     return np.array(Z)
 
 
+def _matplotlib_color_to_plotly(color: str) -> str:
+    """Convert SciPy/matplotlib dendrogram colors (e.g. C1) to Plotly hex."""
+    if color.startswith("#"):
+        return color
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    if len(color) >= 2 and color[0] == "C" and color[1:].isdigit():
+        idx = int(color[1:])
+        cycle = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
+        if cycle:
+            return mcolors.to_hex(cycle[idx % len(cycle)])
+    try:
+        return mcolors.to_hex(mcolors.to_rgba(color))
+    except (ValueError, TypeError):
+        return "#2196F3"
+
+
 def _build_dendrogram(
     merges: list,
     n_clusters: int,
     all_countries: list[str] | None = None,
-):
+) -> go.Figure | None:
     """
-    Build a SciPy dendrogram truncated to the top-level merges.
+    Build a full interactive Plotly dendrogram (every country, every merge).
 
-    Returns a matplotlib Figure rendered via st.pyplot().
-    Truncated to show at most 30 leaf groups so labels stay readable.
-    Branches below the cut are colored, branches above are red.
+    Uses SciPy for layout/coordinates; Plotly provides pan, box-zoom, and
+    scroll-wheel zoom. Branches below the cut are colored; above are red.
     """
+    from collections import defaultdict
+
     from scipy.cluster.hierarchy import dendrogram as scipy_dendrogram
-    import matplotlib.pyplot as plt
-    import matplotlib
 
     if all_countries is None:
         all_countries = list(merges[-1].merged) if merges else []
@@ -362,49 +389,110 @@ def _build_dendrogram(
         return None
 
     n = len(all_countries)
-    p = min(30, max(n_clusters + 5, n_clusters * 2))
 
-    # Distance at the cut point: the merge that would reduce k+1 to k clusters
     cut_merge_idx = len(merges) - (n_clusters - 1) - 1
     if 0 <= cut_merge_idx < len(merges):
         color_threshold = 1.0 - merges[cut_merge_idx].similarity
     else:
         color_threshold = 0
 
-    fig, ax = plt.subplots(figsize=(14, 6))
-
-    scipy_dendrogram(
+    ddata = scipy_dendrogram(
         Z,
         labels=all_countries,
-        ax=ax,
-        truncate_mode="lastp",
-        p=p,
-        leaf_rotation=45,
-        leaf_font_size=8,
+        no_plot=True,
         color_threshold=color_threshold,
         above_threshold_color="#EF5350",
     )
 
-    if color_threshold > 0:
-        ax.axhline(
-            y=color_threshold,
-            color="gray",
-            linestyle="--",
-            alpha=0.6,
-        )
-        ax.text(
-            ax.get_xlim()[1] * 0.98,
-            color_threshold + 0.005,
-            f"k = {n_clusters}",
-            ha="right",
-            va="bottom",
-            fontsize=9,
-            color="gray",
+    # Wider leaf spacing than SciPy default (10) so labels are less cramped.
+    x_scale = DENDROGRAM_LEAF_SPACING / 10.0
+
+    segments_by_color: dict[str, dict[str, list]] = defaultdict(
+        lambda: {"x": [], "y": []}
+    )
+    all_x: list[float] = []
+    all_y: list[float] = []
+    for xs, ys, color in zip(
+        ddata["icoord"], ddata["dcoord"], ddata["color_list"]
+    ):
+        scaled_x = [x * x_scale for x in xs]
+        all_x.extend(scaled_x)
+        all_y.extend(ys)
+        segments_by_color[color]["x"].extend(scaled_x + [None])
+        segments_by_color[color]["y"].extend(ys + [None])
+
+    fig = go.Figure()
+    for color, coords in segments_by_color.items():
+        plotly_color = _matplotlib_color_to_plotly(color)
+        fig.add_trace(
+            go.Scatter(
+                x=coords["x"],
+                y=coords["y"],
+                mode="lines",
+                line=dict(color=plotly_color, width=1.5),
+                hoverinfo="skip",
+                showlegend=False,
+            )
         )
 
-    ax.set_ylabel("Distance (1 - similarity)")
-    ax.set_title(f"Agglomerative Dendrogram (truncated to top {p} groups)")
-    fig.tight_layout()
+    n_leaves = len(ddata["ivl"])
+    x_positions = [(5 + 10 * i) * x_scale for i in range(n_leaves)]
+
+    x_pad = DENDROGRAM_LEAF_SPACING * 0.6
+    x_range = [min(all_x) - x_pad, max(all_x) + x_pad]
+
+    y_max = max(all_y) if all_y else 1.0
+    y_pad = max(0.02, y_max * 0.04)
+    y_range = [0, y_max + y_pad]
+
+    tick_font = max(8, min(11, int(1100 / max(n, 1))))
+    bottom_margin = max(120, min(280, tick_font * 10 + 40))
+
+    if color_threshold > 0:
+        fig.add_hline(
+            y=color_threshold,
+            line_dash="dash",
+            line_color="gray",
+            opacity=0.6,
+            annotation_text=f"k = {n_clusters}",
+            annotation_position="top right",
+        )
+
+    # Width tracks tree span so Streamlit does not stretch it with empty margin.
+    plot_width = int((x_range[1] - x_range[0]) * 5.5)
+    plot_width = max(960, min(16000, plot_width))
+    plot_height = max(420, min(620, int(280 + y_max * 280)))
+
+    fig.update_layout(
+        title=(
+            f"Agglomerative Dendrogram ({n} countries, {len(merges)} merges)"
+        ),
+        yaxis_title="Distance (1 - similarity)",
+        width=plot_width,
+        height=plot_height,
+        xaxis=dict(
+            tickmode="array",
+            tickvals=x_positions,
+            ticktext=ddata["ivl"],
+            tickangle=-90,
+            tickfont=dict(size=tick_font),
+            showgrid=False,
+            range=x_range,
+            fixedrange=False,
+            automargin=False,
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="lightgray",
+            range=y_range,
+            fixedrange=False,
+            automargin=False,
+        ),
+        margin=dict(b=bottom_margin, l=56, r=12, t=48),
+        dragmode="zoom",
+        hovermode=False,
+        autosize=False,
+    )
 
     return fig
 
@@ -704,15 +792,20 @@ with tab2:
             # Dendrogram
             st.subheader("Dendrogram")
             st.caption(
-                "Blue bars are merges that form the final clusters. "
-                "Red bars are merges that would reduce the cluster count further. "
-                "The dashed line marks the cut point."
+                "Full tree: every country is a leaf and every merge step is drawn. "
+                "Colored branches form the final clusters at your cut; red branches are above the cut. "
+                "The dashed line marks the cut point. "
+                "Drag to pan, scroll to zoom, or use the toolbar (box zoom, reset axes)."
             )
             dendro_fig = _build_dendrogram(
                 result.dendrogram.merges, n_clusters, agg_countries
             )
             if dendro_fig is not None:
-                st.pyplot(dendro_fig)
+                st.plotly_chart(
+                    dendro_fig,
+                    use_container_width=False,
+                    config=DENDROGRAM_PLOT_CONFIG,
+                )
             else:
                 st.warning("Could not build dendrogram.")
 
